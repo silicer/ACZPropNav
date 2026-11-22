@@ -15,7 +15,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "1.0.1";
+constexpr const char* kVersion = "1.0.2";
 
 HANDLE g_thread = nullptr;
 volatile LONG g_started = 0;

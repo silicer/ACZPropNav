@@ -17,7 +17,18 @@
 | 特殊武器（`0x90510` 积分器） | ✅ 实测 QAAM 6 发**全命中** |
 | 末端不切回原版（全程 PN） | ✅ `terminal=0` 贯穿整局 |
 | 崩溃 / 异常 | ✅ 多局 0 次 |
-| 离线测试 | ✅ 69 项断言全绿 |
+| 离线测试 | ✅ 全绿：`pnsim` 69 · `initest` 220 · `memtest` 91 · `hooktest` 94 · `hwwatchtest` 27 · `smoke` |
+
+## 本版改动 / What changed in 1.0.2
+
+* **内存读层加固（唯一影响运行时的改动）**。读游戏内存原本依赖"裸 memcpy + 向量化异常
+  处理器 + `longjmp` 恢复"，而 `longjmp` 出 VEH 处理器在 x64 上不是受支持的展开路径 ——
+  一次非法读取会直接崩进程，而不是安全返回失败。现在改为内核中介的
+  `ReadProcessMemory`（内核做范围校验，非法地址返回 FALSE 不抛异常），VEH 仅作为
+  "部分可读范围"的兜底。实测开销约单核 0.02–0.04%。**制导手感完全不变。**
+* 导引头视场门限、双弹 owner 撞键、跨页写保护等修复（1.0.1 之后累积）。
+* CI 现在会跑完整 Windows PE 测试套件（`initest`/`memtest`/`hooktest`/
+  `hwwatchtest`/`smoke`），Linux 侧跑制导数学自测；打包产物有 allowlist 校验。
 
 ## 安装
 
@@ -38,7 +49,7 @@
 [player]
 msl = {
     HomingForesightAmount = 0.7   ; 0 = 纯追踪, 1 = 全力 PN
-    MaxRotationAngle      =       ; 度/秒，留空 = 90（真的按 90 走）
+    MaxRotationAngle      =       ; 度/秒，留空 = 180（真的按 180 走）
     MaxHomingAngle        =       ; 导引头半角，留空 = 用游戏原值
 }
 ```
