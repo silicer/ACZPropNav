@@ -890,6 +890,12 @@ int ChildLocate2() {
 }
 
 int main(int argc, char** argv) {
+    // Unbuffered stdout: this suite deliberately provokes access violations and
+    // guard-page faults, and when one of them is NOT caught the process dies. With
+    // buffered stdio the partial output is lost, so a crash reports nothing at all
+    // and there is no way to tell which test died. (Observed on the Windows CI
+    // runner: a segfault with zero output.)
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc > 1 && std::strcmp(argv[1], "--locate2") == 0) return ChildLocate2();
     std::printf("memtest - ACZPropNav memory layer acceptance tests\n");
     std::printf("synthetic layout: MR+0x00 MH+0x08 LT+0x10 LR+0x18, stride 0x40\n");
