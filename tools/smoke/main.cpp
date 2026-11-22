@@ -89,7 +89,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    check(Contains(log, "ACZPropNav 1.0.0"), "log contains the version banner");
+    // Assert the banner SHAPE, not a hard-coded version: this check used to look for
+    // "ACZPropNav 1.0.0" and silently went stale at the 1.0.1 bump (it was masked by
+    // the memtest segfault for several CI runs). The literal below is a digit, so any
+    // version string from Log::Banner() satisfies it without needing a bump here.
+    {
+        const bool banner = Contains(log, "ACZPropNav 0.") || Contains(log, "ACZPropNav 1.") ||
+                            Contains(log, "ACZPropNav 2.") || Contains(log, "ACZPropNav 3.");
+        check(banner, "log contains the version banner");
+    }
     check(Contains(log, "配置文件 / config:"), "log names the config file");
     check(Contains(log, "记录字节扫描") || Contains(log, "参数表搜索") || Contains(log, "静态参数路径未启用"),
           "reached the discovery stage (or skipped it by design)");

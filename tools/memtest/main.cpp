@@ -535,10 +535,16 @@ void TestWriteSafety() {
         Check(m2.Protect == PAGE_EXECUTE_READ,
               "second page keeps ITS OWN protection (PAGE_EXECUTE_READ, not the first's)");
 
+        // vec[2] = 3.5f lands at offset `page`, not `page - 4`: the 12-byte write
+        // starts at page-8, so float 0 occupies [page-8, page-4), float 1 [page-4, page),
+        // float 2 [page, page+4). Reading page-4 returns 2.5f.
         float back2 = 0.f;
         Check(acz::mem::ReadBytes(reinterpret_cast<uintptr_t>(two + page - 4), &back2, 4) &&
+                  back2 == 2.5f,
+              "page-crossing write landed correct bytes in the first page");
+        Check(acz::mem::ReadBytes(reinterpret_cast<uintptr_t>(two + page), &back2, 4) &&
                   back2 == 3.5f,
-              "page-crossing write landed correct bytes");
+              "page-crossing write landed correct bytes in the second page");
         VirtualFree(two, 0, MEM_RELEASE);
     }
 }
