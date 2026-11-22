@@ -90,14 +90,22 @@ void ResetModuleCache() {
 // HISTORY, so nobody re-adds it.  This used to be a raw memcpy wrapped in a
 // process-wide AddVectoredExceptionHandler() + setjmp/longjmp frame.  It crashed on
 // the very first deliberately-faulting read in CI (ReadBytes(1, buf, 4) killed the
-// process), for two independent reasons:
+// process). What the log demonstrated is a storage-visibility bug, not proof that
+// the longjmp pattern is unconditionally fatal:
 //
-//   1. longjmp out of a vectored exception handler is not a supported unwinding
-//      path on x64.  It leaves the exception dispatcher's bookkeeping behind, so
-//      the process commonly dies instead of resuming.
-//   2. `t_frame` had to be made `volatile` to even be seen by the handler, because
-//      at -O2 the compiler may sink the store below the memcpy (an intrinsic it can
-//      reason about).
+//   1. `t_frame` was a plain (non-volatile) thread_local pointer, so at -O2 the
+//      compiler was free to sink the store below the memcpy - an intrinsic it can
+//      reason about. The handler then ran, read a null frame, correctly concluded
+//      "not my fault" and let the access violation through. That is the mechanism
+//      the CI log actually demonstrated.
+//   2. longjmp out of a VEH handler is also the wrong shape regardless: on x64 it
+//      skips the exception dispatcher's own unwinding bookkeeping. Note the honest
+//      limit of that claim - THIS repository's memtest has a handler
+//      (TestLastChanceHandler) that longjmps out of a VEH and it does work, so
+//      "longjmp out of a VEH always dies" is NOT proven. What is established is that
+//      the pattern depends on details (frame visibility, unwinding state) that are
+//      easy to get wrong and hard to test, which is reason enough not to build a
+//      safety layer on it.
 //
 // It is tempting to keep the guard as a fallback "for the partially-readable case",
 // but it cannot help: GuardedRead returned false whenever the copy faulted, and

@@ -337,7 +337,7 @@ Segmentation fault
 
 **根因**：原设计是"裸 `memcpy` + 进程级 VEH 处理器 + `setjmp/longjmp` 恢复"，
 `ReadProcessMemory/WriteProcessMemory` 只是 `EnsureGuard()` 失败时的兜底。
-两个问题：
+两个问题（**注意第 1 条才是日志真正证实的机制；第 2 条证据不足，见下方"结论校准"**）：
 
 1. **从 VEH 处理器里 `longjmp` 不是受支持的 x64 展开路径**。它跳出处理器帧，
    却没有走异常分发器自己的记账，所以进程常常直接死而不是"恢复"。
@@ -383,6 +383,20 @@ around every dereference" —— 这**是假的**：该工具链根本不生成 
 **教训**：一个在实机三次都没崩的保护层，未必是好的 —— 它可能只是从未被走到。
 CI 的价值就在这里：Windows PE 测试是唯一能跑 `memtest`/`initest`/`hooktest` 的地方，
 而 Linux 本机只能跑 `pnsim`。
+
+> **结论校准（重要，避免后人被误导）**：本节一度把根因写成"**`longjmp` 出 VEH 在 x64 上
+> 必然崩溃**"。这个说法**证据不足** —— 本仓库 `tools/memtest/main.cpp` 的
+> `TestLastChanceHandler` **同样** `longjmp` 出 VEH，而它一直是能通过的（`g_testCatching`
+> 是 `volatile int`，handler 每次直接读内存）。
+>
+> 日志真正证实的是 **`t_frame` 的存储可见性问题**：它是普通的
+> `thread_local GuardFrame*`（非 volatile），`-O2` 允许把这次存储下沉到 `memcpy` 之后
+> （`memcpy` 是编译器看得懂的内建函数），于是 handler 运行时读到**空指针**、
+> 正确判断"这不是我的 fault"、放行 AV → 进程死。
+>
+> 所以准确表述是：**这个模式依赖帧可见性与展开状态等细节，容易写错、难以测试**，
+> 因此不该拿它当安全层的基础；而不是"它必然崩"。真正让删除变得无争议的是另一点：
+> **这条兜底本来就没有收益**（见 §16.9 ①）。
 
 ### 16.7 CI 从红到绿：四个真实问题的修法
 
