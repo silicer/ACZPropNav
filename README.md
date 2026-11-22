@@ -236,8 +236,9 @@ issue 列表：见本仓库的 **Issues** 页。
 需要 [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw) 或任意 x86_64-w64-mingw32 工具链：
 
 ```bash
-./build.sh          # 构建全部产物到 build/
+./build.sh          # 构建全部产物到 build/（strip 过的发行版）
 ./build.sh test     # 构建 + 跑全部离线测试
+./build.sh debug    # 未 strip 的调试版（-O1 -g）到 build/debug/，用于分析崩溃
 ./build.sh clean
 ```
 

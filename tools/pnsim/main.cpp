@@ -925,6 +925,31 @@ void TestStep1B() {
               Fmt("axis=%d score=%.6f", axis, static_cast<double>(score)));
         Check(MaxCompDiff(MatrixAxis(m, 2), heading) < 1e-6f,
               "(j7) MatrixAxis(2) returns that column", "");
+        // REGRESSION: the row candidates used a stride of 3 instead of 4, so
+        // candidate 4 read (m[3],m[4],m[5]) and candidate 5 read (m[6],m[7],m[8]) -
+        // mixing in the w column and missing the real rows entirely. Nobody noticed
+        // because the calibration usually picks a column candidate; this pins both.
+        {
+            // A matrix built with a distinct value per element, so a wrong stride is
+            // guaranteed to change the result.
+            float mm[16];
+            for (int i = 0; i < 16; ++i) mm[i] = static_cast<float>(i + 1);
+            const Vec3 row0 = MatrixAxis(mm, 3);
+            const Vec3 row1 = MatrixAxis(mm, 4);
+            const Vec3 row2 = MatrixAxis(mm, 5);
+            Check(MaxCompDiff(row0, Vec3(1, 2, 3)) < 1e-6f &&
+                      MaxCompDiff(row1, Vec3(5, 6, 7)) < 1e-6f &&
+                      MaxCompDiff(row2, Vec3(9, 10, 11)) < 1e-6f,
+                  "(j7b) MatrixAxis rows use stride 4 (not 3)",
+                  Fmt("row1=(%g %g %g) row2=(%g %g %g)", static_cast<double>(row1.x),
+                      static_cast<double>(row1.y), static_cast<double>(row1.z),
+                      static_cast<double>(row2.x), static_cast<double>(row2.y),
+                      static_cast<double>(row2.z)));
+            // And the transpose relationship must hold for every axis candidate:
+            // matrix rows are identity-image under WorldToLocal only when consistent.
+            Check(MaxCompDiff(MatrixAxis(mm, 3), Vec3(mm[0], mm[1], mm[2])) < 1e-6f,
+                  "(j7c) MatrixAxis row0 == the first four floats' xyz", "");
+        }
         Check(MaxCompDiff(WorldToLocal(m, heading), Vec3(0, 0, 1)) < 1e-5f,
               "(j8) WorldToLocal maps the world heading back to +z", "");
         Check(MaxCompDiff(WorldToLocal(m, MatrixAxis(m, 0)), Vec3(1, 0, 0)) < 1e-5f &&
@@ -1282,6 +1307,36 @@ void TestPn() {
               "(k11c) blended heading never exceeds the per-frame turn budget",
               Fmt("violations=%d worst=%.7f rad", violations,
                   static_cast<double>(worstOver)));
+    }
+
+    // (k14) Exactly anti-parallel heading/LOS must still produce a turn.
+    // A missile flying directly away from its target (theta = pi) makes
+    // Cross(uV,uR) vanish, so the pursuit demand used to be exactly zero and the
+    // missile flew straight forever. Any perpendicular axis is a valid choice here;
+    // what matters is that the command is non-zero and is rate limited.
+    {
+        float turns[4] = {0, 0, 0, 0};
+        const float amounts[4] = {0.f, 0.5f, 1.f, 0.f};
+        bool allValid = true;
+        for (int k = 0; k < 3; ++k) {
+            PnInput in;
+            in.p = Vec3();
+            in.v = Vec3(10.f, 0, 0);
+            in.target = Vec3(-500.f, 0, 0);          // exactly behind
+            in.targetVel = Vec3();
+            in.gameFps = 60.f;
+            in.amount = amounts[k];
+            in.maxRotationDegPerSec = 180.f;
+            PnOutput out;
+            allValid = allValid && ComputePn(in, out);
+            turns[k] = out.turnRad;
+        }
+        Check(allValid, "(k14a) anti-parallel geometry still computes", "");
+        Check(std::fabs(turns[0] - DegToRad(180.f) / 60.f) < 1e-4f,
+              "(k14b) amount=0 with the target dead astern turns by the full budget",
+              Fmt("turn=%.6f rad", static_cast<double>(turns[0])));
+        Check(turns[0] > 1e-4f && turns[0] <= DegToRad(180.f) / 60.f + 1e-4f,
+              "(k14c) that turn is non-zero and rate limited", "");
     }
 
     // (k13) The rmin guard must bound lambda-dot through the whole terminal phase.

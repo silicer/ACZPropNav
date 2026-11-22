@@ -69,7 +69,20 @@ inline Vec3 RotateTowards(const Vec3& from, const Vec3& to, float maxAngleRad) {
     if (ang <= maxAngleRad || ang < 1e-6f) return t;
     // axis = f x t
     Vec3 axis;
-    if (!Normalize(Cross(f, t), axis)) return f;
+    if (!Normalize(Cross(f, t), axis)) {
+        // Exactly (anti)parallel: the cross product is zero and there is no unique
+        // rotation plane, so the old code gave up and returned `from` unchanged -
+        // i.e. a missile pointed exactly 180 deg away from its target never turned
+        // and flew on forever. Pick any axis perpendicular to `from` and take a
+        // normal rate-limited step along it; any choice is correct here because
+        // every direction in that plane is equally valid.
+        Vec3 perp = Cross(f, Vec3(0, 0, 1));
+        if (!Normalize(perp, perp)) perp = Cross(f, Vec3(1, 0, 0));
+        if (!Normalize(perp, perp)) return f;   // f is degenerate; nothing to do
+        const float step = (maxAngleRad > 0.f) ? maxAngleRad : 0.f;
+        const float c = std::cos(step), s = std::sin(step);
+        return NormalizedOr(perp * s + f * c, f);
+    }
     // Rodrigues rotation of f about axis by maxAngleRad
     const float c = std::cos(maxAngleRad), s = std::sin(maxAngleRad);
     const Vec3 r = f * c + Cross(axis, f) * s + axis * (Dot(axis, f) * (1.f - c));

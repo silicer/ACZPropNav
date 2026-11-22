@@ -58,6 +58,13 @@ struct Output {
 // Returns false (and leaves `out` zeroed except the measured fields) for
 // degenerate geometry: |v| too small, target on top of the missile, non-finite
 // inputs.
+// ---------------------------------------------------------------------------
+// DEPRECATED - NOT used by the shipped guidance. This is the Step-1 "lead point"
+// formulation (aim at target + Vt*tGo*amount); the live path is ComputePn below,
+// which is a true lambda-dot law. `Compute` is kept only as the reference model
+// that pnsim (i1)-(i9) asserts against, so the old behaviour stays documented and
+// testable. If you touch production guidance, touch ComputePn, not this.
+// ---------------------------------------------------------------------------
 inline bool Compute(const Input& in, Output& out) {
     out = Output();
     const Vec3 R = in.target - in.p;
@@ -148,9 +155,12 @@ inline Vec3 RotVecFromTo(const Vec3& from, const Vec3& to, float maxAngleRad) {
 // whichever candidate matches the missile heading; this covers both storage orders.
 inline Vec3 MatrixAxis(const float m[16], int candidate) {
     if (candidate < 0 || candidate > 5) return Vec3();
+    // Row-major 4x4: the stride between consecutive elements of a row/column is 4,
+    // never 3. Using 3 for the row candidates read (m[3],m[4],m[5]) / (m[6],m[7],m[8]),
+    // which mixes in the w column and misses the real second row entirely.
     if (candidate < 3) return Vec3(m[candidate], m[4 + candidate], m[8 + candidate]);
     const int r = candidate - 3;
-    return Vec3(m[3 * r], m[3 * r + 1], m[3 * r + 2]);
+    return Vec3(m[4 * r], m[4 * r + 1], m[4 * r + 2]);
 }
 
 // Best forward-axis candidate for a heading (unit-vector dot product).  Returns the
@@ -275,7 +285,18 @@ inline bool ComputePn(const PnInput& in, PnOutput& out) {
     {
         const Vec3 axisRaw = Cross(uV, uR);
         Vec3 axis;
-        if (Normalize(axisRaw, axis)) omegaP = axis * thetaP;
+        if (Normalize(axisRaw, axis)) {
+            omegaP = axis * thetaP;
+        } else if (thetaP > 1e-3f) {
+            // Exactly anti-parallel heading/LOS (a missile flying directly away from
+            // its target): the cross product vanishes so there is no unique plane.
+            // Instead of a zero pursuit demand - which used to leave the missile
+            // flying straight forever - use any perpendicular axis. The PN term
+            // still governs the direction once the geometry stops being degenerate.
+            Vec3 perp = Cross(uV, Vec3(0, 0, 1));
+            if (!Normalize(perp, perp)) perp = Cross(uV, Vec3(1, 0, 0));
+            if (Normalize(perp, perp)) omegaP = perp * thetaP;
+        }
     }
     out.omegaPursuit = Length(omegaP);
 

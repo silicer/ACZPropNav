@@ -84,7 +84,8 @@ inline float BitsF(LONG v) {
 // ---- state shared between Patcher (Tick) and the game thread (detour) --------
 struct TargetCacheEntry {
     uint32_t key = 0xFFFFFFFFu;  // (tObj << 8) | tPart
-    uint32_t frame = 0;
+    uint32_t frame = 0;          // frame the cached position was sampled
+    uint32_t lastFrame = 0;      // frame this entry was last used (LRU eviction)
     Vec3 pos;
     Vec3 vel;        // per-frame target velocity (raw, this frame)
     Vec3 velSmooth;  // low-pass smoothed target velocity (used for the lead)
@@ -271,15 +272,27 @@ ACZ_NOINLINE void MslPnDetour(void* ctrl) {
 // ---- caches ---------------------------------------------------------------
 TargetCacheEntry* CacheFind(uint32_t key) {
     TargetCacheEntry* freeEntry = nullptr;
+    TargetCacheEntry* lru = nullptr;
     for (int i = 0; i < kTargetCache; ++i) {
         TargetCacheEntry& e = g.cache[i];
         if (e.valid && e.key == key) return &e;
-        if (!e.valid && freeEntry == nullptr) freeEntry = &e;
+        if (!e.valid) {
+            if (freeEntry == nullptr) freeEntry = &e;
+        } else if (lru == nullptr || e.lastFrame < lru->lastFrame) {
+            // A big mission can easily have more than kTargetCache distinct
+            // (tObj,tPart) pairs alive (enemies + ground targets + per-part targets).
+            // Returning nullptr once the table filled up silently dropped the target
+            // velocity estimate for every newly locked target, degrading it to a
+            // no-lead intercept - so evict the least recently used entry instead.
+            lru = &e;
+        }
     }
+    if (freeEntry == nullptr) freeEntry = lru;   // table full: recycle the stalest entry
     if (freeEntry != nullptr) {
         freeEntry->valid = false;  // no previous position yet
         freeEntry->key = key;
         freeEntry->frame = 0;
+        freeEntry->lastFrame = g.frameId;
         freeEntry->vel = Vec3();
         freeEntry->velSmooth = Vec3();
         freeEntry->velSmoothValid = false;
@@ -718,6 +731,7 @@ void Apply(void* ctrl) {
         const uint32_t tKey = (static_cast<uint32_t>(tObj) << 8) | static_cast<uint32_t>(tPart);
         TargetCacheEntry* te = CacheFind(tKey);
         if (te != nullptr) {
+            te->lastFrame = g.frameId;   // LRU bookkeeping (eviction when the table fills)
             if (te->frame == g.frameId) {
                 Vt = te->vel;
             } else if (te->valid && te->frame + 1 == g.frameId) {
@@ -733,11 +747,20 @@ void Apply(void* ctrl) {
                 te->frame = g.frameId;
                 te->valid = true;
             }
+            // A mission restart / object-slot recycle makes the target position jump
+            // discontinuously. Clamping keeps the velocity sane, but a single huge
+            // jump still poisons the EMA for several frames, so treat an over-range
+            // step as "position teleported": drop the smoothed estimate too.
             const float kMaxTargetStep = 20.f;  // 20 m/frame == 1200 m/s
             float vtLen = Length(Vt);
             if (vtLen > kMaxTargetStep) {
+                // Over-range step: either a genuinely absurd sample or a teleport (mission
+                // restart, object slot recycled for a different aircraft). Clamp it AND
+                // throw away the smoothed history, so a single jump cannot keep biasing
+                // the lead point for the next several frames via the EMA.
                 Vt = Vt * (kMaxTargetStep / vtLen);
                 vtLen = kMaxTargetStep;
+                te->velSmoothValid = false;
             }
             if (te->velSmoothValid) {
                 Vt = te->velSmooth * 0.6f + Vt * 0.4f;

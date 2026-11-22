@@ -935,3 +935,113 @@ MSLPN:   calibration turn angles: commanded=0.575 deg,
 位置引导不受影响 —— 这正是已验证可用的配置。要真正接管朝向需要重新定标
 （建议下次用一个只发射、不做机动的场景，取单帧 `commanded` 与四个 `produced`
 的比值；若恒为 17.2/19.2 两个值，说明只差一个常数缩放）。
+
+---
+
+## 15. 2026-11-22 外部代码评审的核实与修复
+
+收到一份外部审核报告（12 项）。逐条核实后：**6 项确认为真并已修，
+3 项在提交前已被更早的修复覆盖或本就安全，3 项为文档/工程建议（已采纳部分）**。
+核实过程与结论记在这里，避免下一个人重做。
+
+### 15.1 确认并修复的真 bug
+
+**① `src/core/mod.cpp` — 线程句柄二次关闭 + 卸载期死锁**
+
+`StartOnce()` 在 `CreateThread` 后立刻 `CloseHandle(g_thread)` 但没置空，而
+`DllMain` 的 `DLL_PROCESS_DETACH` 分支又对同一句柄 `WaitForSingleObject` + `CloseHandle`。
+Windows 可能已复用该句柄值 → 二次关闭会误伤无关对象；且进程终止时（`lpvReserved != nullptr`）
+在持有 loader lock 的情况下等待工作线程是经典死锁。
+修：`StartOnce` 不再关闭句柄；DETACH 分支只在 `lpvReserved == nullptr`（真正的
+`FreeLibrary` 动态卸载）时才等待+关闭。**这是本次评审最有价值的一条。**
+
+**② `src/pn/msl_steer.h::MatrixAxis` — 行候选步长写成 3（应为 4）**
+
+列候选正确用步长 4（`m[c], m[4+c], m[8+c]`），行候选却写 `m[3*r]`。于是
+`r=1` 读到 `(m[3],m[4],m[5])`、`r=2` 读到 `(m[6],m[7],m[8])` —— 混进第 4 列（通常是
+`0`/`1`）并且**完全漏掉真正的第 2 行**。因为朝向标定通常选中列候选，实际从未触发，
+但它是个确定无疑的越界语义错误。
+修：改为 `m[4*r]`。新增回归断言 `pnsim` (j7b)/(j7c) 用"每个元素值不同"的矩阵
+钉死步长——旧测试只覆盖列候选，所以一直没抓到。
+
+**③ `src/pn/msl_pn.cpp::CacheFind` — 目标缓存满后无淘汰**
+
+64 槽的 `TargetCacheEntry` 全满时直接返回 `nullptr`。实测日志里 `tObj` 已达 17–64 区间，
+大型关卡（敌机 + 地面目标 + 分部位目标）很容易超过 64 → 之后新锁定的目标全部拿不到
+速度估计，退化成无提前量拦截。
+修：记录 `lastFrame`，满时按 **LRU 淘汰**最久未用的条目。同时补上评审提到的
+"位置瞬移"处理：单帧步长超限时不仅钳位，还**丢弃 EMA 平滑历史**，避免一次瞬移
+连续污染好几帧的提前量。
+
+**④ `src/common/acz_common.h::RotateTowards` 与 `ComputePn` 纯追踪项 — 反向共线零转向**
+
+两向量恰好反向（导弹正背对目标）时 `Cross` 为零向量、`Normalize` 失败，旧代码
+直接返回原方向 → **导弹永远直飞不转弯**。修：此时任取一个与 `f` 垂直的轴按
+限速转一步（该平面上任何方向都等价）。新增回归断言 `pnsim` (k14a–c)：
+`amount=0` 且目标正后方时，转角必须等于满额预算且非零。
+
+### 15.2 评审提出、但提交前已修复 / 本就安全
+
+**⑤ `WaitTramp()` 自旋竞态与 trampoline 发布顺序 — 已在此前修复**
+评审建议"在写入口跳转**之前**先发布 `*trampoline`"。查 `src/hook/hook.cpp`：
+`*trampoline = trampMem;` 已在 `WriteJumpLocked` 之前（本轮新增的 A2 修复就是它），
+失败路径逐个回滚置空。评审看到的是旧版本。
+
+**⑥ `AczAddonInit` 硬编码 ABI 越界风险 — 本就安全**
+评审担心直接按 `+0x08/+0x10/+0x28` 解引用宿主结构。实际代码**全部**走
+`mem::IsReadable` + `mem::Read`（SEH 保护）+ `wchar_t buf[512]` 有界拷贝，
+不是裸解引用。这条是基于未细读的推断，无需改动（但"加版本号"的长期建议合理，
+已记在 §15.4）。
+
+**⑦ `FlushInstructionCache` 缺失 — 本就调用**
+`src/hook/hook.cpp` 有 6 处 `FlushInstructionCache`（relay 写入后、跳板写入后、
+目标 prologue 打补丁后、卸载还原后）。已满足。
+
+### 15.3 部分采纳
+
+**⑧ `ComputePn` 的 `gameFps` 在非 60 FPS 下漂移**
+评审假定调用处传固定 `60.f`。实际 `msl_pn.cpp` **每帧从 `*(u32*)(ctrl+0x6EC)` 读取
+引擎自己的帧率常量**（`g.gameFps`，本版本为 60），不是硬编码——这正是上一轮修
+3 倍转角偏差时做的。若某版本改了该常量，我们会自动跟随。**无需改动。**
+
+**⑨ `msl_steer.h::Compute` 是旧模型、与 `ComputePn` 冗余**
+确认：`Compute`（Step-1 前置点公式）**只被 `pnsim` (i1)–(i9) 当作参考模型使用**，
+生产路径完全走 `ComputePn`（真 λ̇ 律）。两条路径模型不同是有意的
+（`pn.cpp` 供特武/文档、`msl_steer.h` 供两条实际钩子），但确实容易混淆。
+已在 `Compute` 上方加显式 **DEPRECATED** 注释，说明它是测试参考、不要改它。
+
+**⑩ 没有调试符号可供分析崩溃**
+采纳：`./build.sh debug` 现在产出 **未 strip**（`-O1 -g`，10 MB，含 19 个 debug 段）
+到 `build/debug/`，发行版仍保持 strip（679 KB）。分析玩家崩溃转储时用它对照。
+
+### 15.4 暂不采纳（留作 backlog）
+
+* **给 addon ABI 加版本号/大小校验**：合理，但宿主 ABI 是我们逆向出来的既定事实，
+  加字段需要社区 loader 配合，目前收益低于风险。保持现状 + 已有 SEH 保护。
+* **README 标注已验证的 `acz.exe` SHA-256**：有价值，但每次 Steam 更新都会变，
+  而我们的入口字节校验本就会在版本不匹配时**安全放弃**（不崩）。可后续加。
+* **`patcher.cpp` 是否过滤无导引武器**：评审未完整读完该文件。特武路径有
+  `IsMissileSlot()`（要求对象确属 `Weapon*Ctrl` 的导弹槽）+ `nonMissile` 计数，
+  实测日志 `nonMissile=0`。已覆盖。
+
+### 15.5 评审未读、但经核实已正确的两处
+
+**⑪ `loader/proxy_common.h` 的 DLL 搜索劫持与 loader-lock 风险 — 本就正确**
+
+* 真实系统 DLL 用 `GetSystemDirectoryW` 拼出 `%SystemRoot%\System32\<name>.dll`
+  的**绝对路径**再 `LoadLibraryW`（`proxy_common.h:100/117`），不依赖搜索顺序，
+  因此不存在"同名 DLL 劫持"。
+* `DllMain` 内**不调用 `LoadLibrary`**：ATTACH 只做
+  `GET_MODULE_HANDLE_EX_FLAG_PIN`（把自己钉在进程里，避免被卸载时别的线程还在
+  转发函数里）+ 建 event + `CreateThread`；真正的加载在工作线程完成。
+  DETACH 分支也正确地只在 `reserved == nullptr` 时等待 worker。
+  这正是评审担心的两个问题，代码里都已经处理了。
+
+**⑫ `hook.cpp` 中段解码器（REX/VEX/EVEX、RIP 相对判定）— 仍需一次完整审计**
+
+这是唯一一条评审说"没读完、建议自查"且我们确实没有系统覆盖的部分。
+`hooktest` 覆盖了安装/卸载/拒绝不安全序言与两种代理转发，但**没有**对全部
+x86-64 前缀组合做穷举。不过：解码器采取的是**保守策略**——任何它不认识的编码
+都会让 `Decode` 返回 0，`DecodePrologue` 随之失败、`Install` 拒绝安装并记录原因。
+也就是说"漏判"的后果是**放弃 Hook**（导弹退回原版制导），而不是打错补丁。
+风险可控，但值得后续补一组 fuzz/穷举测试。

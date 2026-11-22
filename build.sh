@@ -17,6 +17,19 @@ SRC=src
 CXXFLAGS="-std=c++17 -O2 -fno-exceptions -fno-rtti -Wall -Wextra -Wno-unused-parameter \
  -Isrc -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX"
 LDFLAGS="-static -static-libgcc -static-libstdc++ -s"
+
+# ./build.sh debug builds an UNSTRIPPED variant (-O1 -g) into build/debug/
+# so a player-submitted crash dump can be turned into file:line. The shipping binaries
+# stay stripped: that is what removes the MinGW runtime dependency footprint.
+DEBUG_BUILD=0
+if [ "${1:-}" = "debug" ]; then
+    DEBUG_BUILD=1
+    CXXFLAGS="${CXXFLAGS//-O2/-O1}"
+    CXXFLAGS="$CXXFLAGS -g"
+    LDFLAGS="-static -static-libgcc -static-libstdc++"
+    BUILD=build/debug
+    shift
+fi
 DEFS="-lkernel32 -luser32 -lpsapi -ladvapi32"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -187,5 +200,5 @@ case "${1:-all}" in
     clean) rm -rf "$BUILD"; green "cleaned";;
     test)  do_all && do_test;;
     all|"") do_all;;
-    *) red "usage: ./build.sh [all|test|clean]"; exit 2;;
+    *) red "usage: ./build.sh [all|test|clean|debug]"; exit 2;;
 esac

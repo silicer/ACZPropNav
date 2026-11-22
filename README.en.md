@@ -152,8 +152,9 @@ If a game update breaks the fingerprints, run `Probe=1` and follow
 ## Build & test
 
 ```bash
-./build.sh          # everything into build/
+./build.sh          # everything into build/ (stripped release build)
 ./build.sh test     # build + run all offline tests
+./build.sh debug    # unstripped -O1 -g build into build/debug/ (crash analysis)
 ```
 
 Offline suites (no game required): `initest` (INI parser vs. the real AC8PropNav.ini,

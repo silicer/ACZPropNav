@@ -166,8 +166,13 @@ DWORD WINAPI ModThread(LPVOID) {
 
 void StartOnce() {
     if (::InterlockedCompareExchange(&g_started, 1, 0) != 0) return;
+    // The handle is deliberately KEPT (not closed here): DllMain's
+    // DLL_PROCESS_DETACH branch waits on it and then closes it. Closing it here
+    // and closing it again there was a double-close - Windows may have recycled
+    // the numeric handle by then, so the second CloseHandle could target an
+    // unrelated object, and the WaitForSingleObject in between operated on a
+    // dead handle (STATUS_INVALID_HANDLE under a debugger / strict checks).
     g_thread = ::CreateThread(nullptr, 0, &ModThread, nullptr, 0, nullptr);
-    if (g_thread) ::CloseHandle(g_thread);
 }
 
 } // namespace
@@ -214,7 +219,7 @@ extern "C" __declspec(dllexport) int AczAddonInit(void* hostCtx) {
     return 1;
 }
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID lpvReserved) {
     switch (reason) {
         case DLL_PROCESS_ATTACH:
             ::DisableThreadLibraryCalls(module);
@@ -222,10 +227,15 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             break;
         case DLL_PROCESS_DETACH:
             g_stop = 1;
-            // Give the worker a bounded chance to unwind before the image goes
-            // away (only reachable if someone FreeLibrary's us; the game does not).
-            if (g_thread) ::WaitForSingleObject(g_thread, 3000);
-            if (g_thread) { ::CloseHandle(g_thread); g_thread = nullptr; }
+            // lpvReserved != nullptr means the PROCESS is terminating, not that
+            // someone called FreeLibrary. In that case every other thread is already
+            // being torn down and we hold the loader lock: waiting there is a classic
+            // deadlock (and pointless, the process is going away regardless).
+            // Only the dynamic-unload path (lpvReserved == nullptr) may block.
+            if (lpvReserved == nullptr) {
+                if (g_thread) ::WaitForSingleObject(g_thread, 3000);
+                if (g_thread) { ::CloseHandle(g_thread); g_thread = nullptr; }
+            }
             break;
         default:
             break;
