@@ -809,12 +809,11 @@ private:
                 return;
             }
             cfg_.runtime.terminalZone = v;
-            if (v > 0.0f) {
-                Warn(line,
-                     "[runtime] TerminalZone=%.0f m: inside this radius the vanilla guidance "
-                     "finishes the approach instead of PN (diagnostic; 0 = full PN)",
-                     static_cast<double>(v));
-            }
+            // This is an informational note about a legitimate setting, not a problem
+            // with the config: use Warn() and every caller that asserts "no warnings"
+            // (initest, and users reading the log) would treat a valid option as an
+            // error. The value is echoed in the MSLPN: startup line instead.
+            (void)line;
             return;
         }
         if (key == "hookargindex") {
