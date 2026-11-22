@@ -398,3 +398,34 @@ CI 第一次真正跑起 Windows PE 测试，连续暴露了四个问题。按�
 **另一个教训**：`build.sh` 在第一个失败的测试二进制处停止，所以 `smoke` 的陈旧断言
 被 `memtest` 的崩溃掩埋了好几轮。修好前一个 bug 后，下一个才浮出来 ——
 看到"只差一个"时，别假设它是最后一个。
+
+### 16.8 发布产物本身是错的：zip 带了一层包装目录
+
+**这是最"丢人"的一个 bug，因为它让前两个版本的安装说明完全失效。**
+
+`tools/package_release.sh` 把文件放进 `$STAGE/ACZPropNav/` 再 `zip -r ACZPropNav`，
+所以 zip 成员是 `ACZPropNav/ACZPropNav.dll`。但 README.md / README.en.md /
+RELEASE_NOTES.md / docs/RELEASING.md **全部**写的是"把发布包解压到 `ACZero\`"。
+照做会得到：
+
+```text
+ACZero\ACZPropNav\XINPUT1_4.dll      ← 游戏永远找不到这个代理 DLL
+ACZero\ACZPropNav\ACZPropNav.dll     ← 也就永远不会加载
+```
+
+结果：**模组静默不生效**。用户会以为装好了、游戏没变化。
+
+**实测确认**：直接下载已发布的 `v1.0.1-win64.zip`，`unzip -Z1` 显示确实带
+`ACZPropNav/` 顶层目录。v1.0.0 同理 —— 两个版本的"解压即用"从未真正成立。
+
+**修法**：
+* `DEST=$STAGE`（不再多一层），归档时按**文件名列表**打而不是按目录：
+  `zip -q -X "$ZIP" "${PAYLOAD_FILES[@]}"`；
+* 归档后**硬断言**任何成员含 `/` 就失败：
+  `unzip -Z1 "$ZIP" | grep -q '/'` → `die`；
+* `build.sh test` 新增 `do_package_check`：真打一个包并断言平铺，
+  本地 `./build.sh test` 就能抓到，不必等发版。
+
+**教训**：打包脚本"跑成功"不等于"产物可用"。原来的校验只对比了成员**文件名集合**
+（用 `sed 's#^ACZPropNav/##'` 把前缀剥掉再比），**恰好把包装目录这一层掩盖了** ——
+校验逻辑自己把要检的东西规范化掉了。现在的断言直接看原始 `unzip -Z1` 输出。
