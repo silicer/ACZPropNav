@@ -9,8 +9,29 @@
 # Windows/CI sandboxes; it performs exactly the same steps as the Makefile.
 set -u
 
-CC=${CC:-x86_64-w64-mingw32-gcc}
-CXX=${CXX:-x86_64-w64-mingw32-g++}
+# Toolchain selection. Two naming conventions exist for the same compiler:
+#   * Debian/Ubuntu mingw-w64 packages install prefixed binaries
+#     (x86_64-w64-mingw32-g++), which is what the maintainer's Linux checkout uses;
+#   * MSYS2's MINGW64 environment installs plain `gcc`/`g++` that already target
+#     x86_64-w64-mingw32, so the prefixed name does not exist there (and CI on a
+#     Windows runner runs inside that environment).
+# Pick whichever is actually on PATH, unless the caller overrode CC/CXX.
+if [ -z "${CXX:-}" ]; then
+    if command -v x86_64-w64-mingw32-g++ >/dev/null 2>&1; then
+        CXX=x86_64-w64-mingw32-g++
+    elif command -v g++ >/dev/null 2>&1; then
+        CXX=g++
+    else
+        CXX=x86_64-w64-mingw32-g++
+    fi
+fi
+if [ -z "${CC:-}" ]; then
+    case $CXX in
+        *mingw32-g++) CC=${CXX%g++}gcc ;;
+        *)            CC=${CXX%g++}gcc ;;
+    esac
+    command -v "$CC" >/dev/null 2>&1 || CC=$CXX
+fi
 BUILD=build
 SRC=src
 

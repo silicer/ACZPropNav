@@ -47,16 +47,21 @@ jobs:
       - name: Install MinGW-w64 toolchain (MSYS2)
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             mingw-w64-x86_64-gcc
             make
             zip
 
+      # Inside MSYS2's MINGW64 environment the compiler is plain `g++` (it already
+      # targets x86_64-w64-mingw32); the Debian-style `x86_64-w64-mingw32-g++` name
+      # does not exist there. build.sh probes for whichever is present, so just show
+      # what we actually got rather than assuming a name.
       - name: Toolchain version
         run: |
-          x86_64-w64-mingw32-g++ --version
+          command -v x86_64-w64-mingw32-g++ && x86_64-w64-mingw32-g++ --version | head -1
+          command -v g++ && g++ --version | head -1
           echo "---"
           git --version
 
@@ -83,7 +88,7 @@ jobs:
             build/ACZPropNav.dll
             build/XINPUT1_4.dll
             build/VERSION.dll
-          if-no-files-found: warn
+          if-no-files-found: ignore
           retention-days: 14
 
   # ---------------------------------------------------------------------------
