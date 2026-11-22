@@ -60,6 +60,7 @@ jobs:
             make
             zip
             unzip
+            git
 
       - name: Read version from kVersion
         id: ver

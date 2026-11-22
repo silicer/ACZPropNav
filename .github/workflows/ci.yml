@@ -53,17 +53,23 @@ jobs:
             mingw-w64-x86_64-gcc
             make
             zip
+            git
 
-      # Inside MSYS2's MINGW64 environment the compiler is plain `g++` (it already
-      # targets x86_64-w64-mingw32); the Debian-style `x86_64-w64-mingw32-g++` name
-      # does not exist there. build.sh probes for whichever is present, so just show
-      # what we actually got rather than assuming a name.
+      # Inside MSYS2 the compiler is plain `g++` (it already targets
+      # x86_64-w64-mingw32); the Debian-style prefixed name does not exist there.
+      # build.sh probes for whichever is present. Keep this step diagnostic-only and
+      # never let it fail the job: an absent optional name is not an error.
       - name: Toolchain version
         run: |
-          command -v x86_64-w64-mingw32-g++ && x86_64-w64-mingw32-g++ --version | head -1
-          command -v g++ && g++ --version | head -1
-          echo "---"
-          git --version
+          echo "PATH=$PATH"
+          for c in x86_64-w64-mingw32-g++ g++ x86_64-w64-mingw32-gcc gcc; do
+            if command -v "$c" >/dev/null 2>&1; then
+              echo "--- $c ($(command -v "$c"))"
+              "$c" --version | head -1
+            else
+              echo "--- $c: not present"
+            fi
+          done
 
       # `build.sh test` builds every target and then runs the six offline test
       # binaries. On Windows they execute natively, so this is the full suite
