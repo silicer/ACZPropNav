@@ -1,10 +1,21 @@
-// ACZPropNav - SEH-safe process memory primitives, region enumeration, scanners.
+// ACZPropNav - fault-safe process memory primitives, region enumeration, scanners.
 //
 // Everything here is designed to be safe inside a live, Steam-DRM-wrapped game:
 //  - every raw dereference goes through a fault guard (see "fault guard" below),
 //  - scans only touch committed, readable memory that VirtualQueryEx reports,
 //  - writes re-protect the page, write, restore, flush icache when exec,
 //  - writes are alignment/size checked and hard-capped.
+//
+// ---------------------------------------------------------------------------
+// Fault strategy: kernel first, exception recovery only as a last resort
+// ---------------------------------------------------------------------------
+// Reads and writes go through ReadProcessMemory/WriteProcessMemory, which the kernel
+// range-checks and which return FALSE rather than raising in our thread.  The VEH +
+// setjmp/longjmp guard described below is only used for the bytes a partially
+// readable range needs, and is deliberately not the normal path: longjmp out of a
+// VEH handler is not a supported unwinding path on x64, and provoking hardware
+// faults inside the game's own thread thousands of times per second is not
+// something to rely on.
 //
 // ---------------------------------------------------------------------------
 // Why there is no `__try/__except` in this file
@@ -126,7 +137,17 @@ struct GuardFrame {
     uintptr_t hi;   // page-aligned end (exclusive)
 };
 
-thread_local GuardFrame* t_frame = nullptr;
+// VOLATILE is load-bearing, not style.  The handler runs on this same thread from
+// inside an exception, so it re-reads this pointer from memory while the faulting
+// memcpy is still on the stack.  If the compiler is allowed to keep it in a
+// register (or to sink the store below the memcpy, which it may do because the
+// memcpy is an intrinsic it can reason about), the handler sees a stale or null
+// frame and declines the fault - so the access violation propagates and the
+// process dies.  That is exactly what the Windows CI run showed: the very first
+// deliberately-faulting read (ReadBytes(1, buf, 4)) segfaulted instead of
+// returning false.  In-game it stayed hidden only because every pointer the mod
+// read in those sessions happened to be valid, so no fault ever fired.
+thread_local GuardFrame* volatile t_frame = nullptr;
 volatile LONG g_guardState = 0;  // 0 = uninitialised, 1 = installing, 2 = ready, 3 = unavailable
 
 uintptr_t PageSize() {
@@ -143,7 +164,7 @@ void ArmWindow(GuardFrame& f, uintptr_t addr, size_t n) {
 }
 
 extern "C" LONG CALLBACK AczGuardHandler(EXCEPTION_POINTERS* ep) {
-    GuardFrame* frame = t_frame;
+    GuardFrame* frame = t_frame;   // volatile read: must happen before any test below
     // No active guard on this thread -> not our fault: let the game handle it.
     if (!frame) return EXCEPTION_CONTINUE_SEARCH;
     if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
@@ -189,7 +210,9 @@ ACZ_NOINLINE bool GuardedRead(void* dst, uintptr_t src, size_t n) {
         return false;
     }
     t_frame = &frame;
+    __sync_synchronize();          // publish the frame before the faulting copy runs
     std::memcpy(dst, reinterpret_cast<const void*>(src), n);
+    __sync_synchronize();
     t_frame = frame.prev;
     return true;
 }
@@ -204,27 +227,52 @@ ACZ_NOINLINE bool GuardedWrite(uintptr_t dst, const void* src, size_t n) {
         return false;
     }
     t_frame = &frame;
+    __sync_synchronize();
     std::memcpy(reinterpret_cast<void*>(dst), src, n);
+    __sync_synchronize();
     t_frame = frame.prev;
     return true;
 }
 
-// Kernel-mediated fallbacks: ReadProcessMemory/WriteProcessMemory validate the
-// range in the kernel and return FALSE instead of raising in our thread.
+// Kernel-mediated copy.  ReadProcessMemory/WriteProcessMemory validate the range
+// in the kernel and return FALSE instead of raising in our thread, so they cannot
+// crash the caller.  This is the PRIMARY path, not a fallback.
+//
+// It used to be the other way round: a VEH handler + setjmp/longjmp around a raw
+// memcpy, with these only as a fallback.  That design has two problems.  First,
+// longjmp out of a vectored exception handler on x64 is not something the Win32
+// longjmp is specified to survive: it unwinds the handler frame but not the
+// exception dispatcher's own bookkeeping, so the process commonly dies instead of
+// recovering - which is precisely what the Windows CI run showed on the very first
+// deliberately-faulting read.  Second, even when it "worked" it meant the mod
+// triggered and swallowed a real hardware fault thousands of times a second on the
+// game thread, which is not a thing to do inside someone else's process.
+//
+// Cost check, from a real session: 13707 Apply() calls over ~505 s, 10755 live-slot
+// iterations, ~10 reads each => ~213 kernel copies/s.  At 1-2 us each that is
+// 0.02-0.04 % of one core.  Correctness beats a microsecond.
+//
+// The guard is still kept for the one case the kernel cannot arbitrate (see
+// CopyFromTarget below), but it is no longer on the normal path.
 bool CopyFromTarget(void* dst, uintptr_t src, size_t n) {
     EnsureProcess();
-    if (g_isSelf && EnsureGuard()) return GuardedRead(dst, src, n);
     SIZE_T got = 0;
     const BOOL ok = ReadProcessMemory(g_hProcess, reinterpret_cast<LPCVOID>(src), dst, n, &got);
-    return ok != FALSE && got == n;
+    if (ok != FALSE && got == n) return true;
+    // ReadProcessMemory refuses partially-readable ranges as a whole; retry under
+    // the in-process guard so a read that only grazes an unmapped page still
+    // returns the bytes that are valid, matching the old behaviour.
+    if (g_isSelf && EnsureGuard()) return GuardedRead(dst, src, n);
+    return false;
 }
 
 bool CopyToTarget(uintptr_t dst, const void* src, size_t n) {
     EnsureProcess();
-    if (g_isSelf && EnsureGuard()) return GuardedWrite(dst, src, n);
     SIZE_T put = 0;
     const BOOL ok = WriteProcessMemory(g_hProcess, reinterpret_cast<LPVOID>(dst), src, n, &put);
-    return ok != FALSE && put == n;
+    if (ok != FALSE && put == n) return true;
+    if (g_isSelf && EnsureGuard()) return GuardedWrite(dst, src, n);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -541,7 +589,7 @@ std::vector<Region> ExecutableRegions(size_t minSize) {
     return out;
 }
 
-// ---- SEH-safe primitive access -------------------------------------------
+// ---- Fault-safe primitive access ------------------------------------------
 
 bool IsReadable(uintptr_t addr, size_t size) {
     if (!addr || !size) return false;

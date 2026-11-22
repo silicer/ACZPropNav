@@ -17,7 +17,7 @@
 //     We record the node pointer and the caller's return address (one of the six
 //     known spawn functions).
 //
-//   * Tick sampler (read-only, every mem::Read* is SEH guarded):
+//   * Tick sampler (read-only, every mem::Read* is fault-guarded):
 //       - global time-sorted node list at exe+0x33EDB0, once per second,
 //       - up to 8 captured pool nodes x 12 samples, changed u32 offsets,
 //       - singleton S = exe+0x3219A0 list heads / counts,

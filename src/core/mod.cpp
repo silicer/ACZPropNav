@@ -3,7 +3,7 @@
 // Loaded by the XINPUT1_4.dll (or VERSION.dll) proxy that sits next to
 // ACZero\acz.exe. Everything happens on a private thread so we never block or
 // delay the game's own startup, and nothing here can take the game down: the
-// patcher only writes to memory it has verified, and every access is SEH guarded.
+// patcher only writes to memory it has verified, and every access is fault guarded.
 #include <windows.h>
 #include <cstdio>
 #include <string>

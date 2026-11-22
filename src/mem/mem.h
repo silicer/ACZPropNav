@@ -1,4 +1,4 @@
-// ACZPropNav - SEH-safe process memory primitives, region enumeration and scanners.
+// ACZPropNav - fault-safe process memory primitives, region enumeration and scanners.
 //
 // Everything here is designed to be safe to run inside a live, running game:
 //  - every dereference goes through __try/__except,
@@ -43,7 +43,7 @@ void EnumRegions(std::vector<Region>& out, size_t minSize = 0x1000);
 std::vector<Region> WritableRegions(size_t minSize = 0x1000);
 std::vector<Region> ExecutableRegions(size_t minSize = 0x1000);
 
-// ---- SEH-safe primitive access -------------------------------------------
+// ---- Fault-safe primitive access ------------------------------------------
 bool IsReadable(uintptr_t addr, size_t size);
 bool ReadBytes(uintptr_t addr, void* dst, size_t size);
 bool WriteBytes(uintptr_t addr, const void* src, size_t size);

@@ -264,7 +264,7 @@ ACZero\
 | # | 项 | 结论 |
 |---|---|---|
 | ⑤ | `WaitTramp()` 竞态与 trampoline 发布顺序 | 已在更早的修复里解决：`*trampoline = trampMem` 在 `WriteJumpLocked` **之前**，失败路径逐个回滚置空 |
-| ⑥ | `AczAddonInit` 硬编码 ABI 越界 | 本就安全：全部走 `mem::IsReadable` + `mem::Read`（SEH）+ `wchar_t buf[512]` 有界拷贝，不是裸解引用。（"加版本号/大小校验"的长期建议记在 §8.4） |
+| ⑥ | `AczAddonInit` 硬编码 ABI 越界 | 本就安全：全部走 `mem::IsReadable` + `mem::Read`（内核中介的 ReadProcessMemory，非法地址返回 false 而不抛异常）+ `wchar_t buf[512]` 有界拷贝，不是裸解引用。（"加版本号/大小校验"的长期建议记在 §8.4） |
 | ⑦ | `FlushInstructionCache` 缺失 | 本就调用，共 6 处（relay 写入后、跳板写入后、prologue 打补丁后、卸载还原后） |
 | ⑪ | `loader/proxy_common.h` DLL 搜索劫持 / loader-lock | 本就正确：真实系统 DLL 用 `GetSystemDirectoryW` 拼绝对路径再 `LoadLibraryW`，不依赖搜索顺序；`DllMain` 内不 `LoadLibrary`（ATTACH 只做 `GET_MODULE_HANDLE_EX_FLAG_PIN` + 建 event + `CreateThread`），真正的加载在工作线程 |
 
@@ -279,7 +279,7 @@ ACZero\
 ### 8.4 暂不采纳（backlog）
 
 * 给 addon ABI 加版本号/大小校验 —— 合理，但宿主 ABI 是逆向出来的既定事实，加字段要社区
-  loader 配合，收益低于风险；已有 SEH 保护。
+  loader 配合，收益低于风险；已有 fault-safe 读层保护。
 * README 标注已验证的 `acz.exe` SHA-256 —— 每次 Steam 更新都会变，而入口字节校验本就会在
   版本不匹配时安全放弃。可后续加。
 * `hook.cpp` 中段解码器（REX/VEX/EVEX、RIP 相对判定）**仍缺一次完整审计**：`hooktest` 覆盖了
@@ -319,3 +319,57 @@ ACZero\
 5. 要改行为就改 `docs/MSL_PN.md` 指向的 `src/pn/msl_steer.h`（纯数学，`pnsim` 可测），
    **不要在 detour 里写数学**，detour 里也不要打日志。
 6. 任何新的探测都遵守 §4.7 的规矩。两次崩溃的代价已经付过了。
+
+### 16.6 内存读层：`longjmp` 出 VEH 处理器在 x64 上会崩（CI 首次暴露）
+
+**症状**：Windows CI 上 `memtest` 段错误，且**没有任何输出**（连 banner 都没有）。
+先加 `setvbuf(stdout, nullptr, _IONBF, 0)` 让崩溃前的输出不丢，再加 `MEMTEST_TRACE=1`
+逐调用打印，才定位到：
+
+```text
+- fault-safe ReadBytes
+      [trace] ReadBytes(0, buf, 4)
+      [trace] ReadBytes(1, buf, 4)  <-- first real fault
+Segmentation fault
+```
+
+也就是**第一次故意制造非法访问就死了** —— 保护机制本身没生效。
+
+**根因**：原设计是"裸 `memcpy` + 进程级 VEH 处理器 + `setjmp/longjmp` 恢复"，
+`ReadProcessMemory/WriteProcessMemory` 只是 `EnsureGuard()` 失败时的兜底。
+两个问题：
+
+1. **从 VEH 处理器里 `longjmp` 不是受支持的 x64 展开路径**。它跳出处理器帧，
+   却没有走异常分发器自己的记账，所以进程常常直接死而不是"恢复"。
+2. 即便侥幸能用，也意味着模组在**游戏线程上每秒触发并吞掉几十次真实硬件异常**
+   —— 在别人的进程里这不该是常规操作。
+
+另外 `t_frame` 原本是**非 volatile** 的普通指针：`-O2` 下编译器可以把它的存储
+下沉到 `memcpy` 之后（memcpy 是它看得懂的内建函数），此时处理器读到空指针就
+直接放行 AV。这条在游戏里之所以没暴露，纯粹是因为三次实机测试里模组读到的指针
+**恰好都是有效的**，热路径从未真正触发过。
+
+**修法**（三层，按可靠性排序）：
+
+1. **主路径改为内核中介**：`CopyFromTarget/CopyToTarget` 先走
+   `ReadProcessMemory/WriteProcessMemory` —— 内核会做范围校验，非法地址**返回 FALSE
+   而不在我们线程里抛异常**。
+2. `g_isSelf && EnsureGuard()` 的 VEH 路径降级为**只处理"部分可读范围"**的兜底
+   （内核会因为范围里有一页不可读而整体拒绝，这时再用 guard 取回合法字节，
+   保持旧行为）。
+3. `t_frame` 改 `thread_local GuardFrame* volatile`，并在两次 `memcpy` 前后加
+   `__sync_synchronize()`，保证帧在故障发生前已真实写入内存。
+
+**代价核算**（按真实会话的计数，不是猜的）：13707 次 `Apply()` / ~505 s，
+10755 次活槽遍历，每槽约 10 次读 ⇒ **约 213 次内核拷贝/秒**。按 1–2 µs 计
+= **单核的 0.02–0.04%**。正确性远比一微秒重要。
+
+**顺带**：`docs/ARCHITECTURE.md` 原先写"**Everything SEH-guarded.** `__try/__except`
+around every dereference" —— 这**是假的**：该工具链根本不生成 MS 异常处理器
+（无 `__C_specific_handler`、无 `.xdata` funclet，实测 AV 不被捕获）。
+已改为如实描述"内核中介 + VEH 仅作兜底"，并把 `SEH-safe` 字样从 `src/mem/*`、
+`src/core/probe*`、`src/core/mod.cpp` 和 `memtest` 的用例名里一并去掉。
+
+**教训**：一个在实机三次都没崩的保护层，未必是好的 —— 它可能只是从未被走到。
+CI 的价值就在这里：Windows PE 测试是唯一能跑 `memtest`/`initest`/`hooktest` 的地方，
+而 Linux 本机只能跑 `pnsim`。

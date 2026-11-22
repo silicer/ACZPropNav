@@ -35,7 +35,7 @@ settings by steering the missiles in the game's own per-frame update.
    | src/pn    msl_pn.cpp     | plain-MSL post-update hook + slot scan + log |
    | src/pn    msl_steer.h    | true λ̇ PN math (pure, `pnsim`-tested)        |
    | src/pn    pn.cpp         | pursuit / PN / blend / rate limit / FOV      |
-   | src/mem   mem.cpp        | SEH-safe read/write, region scan, float runs |
+   | src/mem   mem.cpp        | fault-safe read/write, region scan, float runs |
    | src/mem   discovery.cpp  | param-table + entity correlator (opt-in)     |
    | src/hook  hook.cpp       | conservative x64 inline hook engine          |
    +-----------------------------------------------------------------------+
@@ -51,7 +51,7 @@ settings by steering the missiles in the game's own per-frame update.
 | `src/core/probe_*.{h,cpp}` | the two read-only diagnostic probes (`Probe`, `HwWatch`) |
 | `src/pn/msl_pn.cpp` + `msl_steer.h` | plain-MSL hook, slot scan, true λ̇ PN math |
 | `src/pn/pn.cpp` + `pn.h` | pursuit / lead-point PN / blend / rate limit / FOV (also the `pnsim` model) |
-| `src/mem/*` | SEH-safe read/write, region scan, discovery correlator |
+| `src/mem/*` | fault-safe read/write, region scan, discovery correlator |
 | `src/hook/hook.cpp` | conservative x64 inline hook engine (refuses anything it cannot relocate) |
 | `loader/` | `XINPUT1_4.dll` and `VERSION.dll` proxies |
 | `tools/` | offline tests, `.arc`/`.wpb` tooling, RE scripts |
@@ -66,8 +66,15 @@ Every test lives in its own `tools/<name>/` directory and is picked up by `build
    (live mask bit + the object at `ctrl` is a weapon controller) before the PN hooks write
    it; the static-parameter path only writes rows a locator proved (or the user forced with
    `ForceOffsets=1`).
-2. **Everything SEH-guarded.** `__try/__except` around every dereference; exceptions
-   in our tick loop must never propagate into the game.
+2. **Every dereference is fault-safe, but NOT via `__try/__except`.** The MinGW-w64
+   toolchain does not emit a Microsoft exception handler for `__try/__except` (no
+   `__C_specific_handler`, no `.xdata` funclet), so a real access violation would
+   propagate as an unhandled AV. Reads/writes therefore go through
+   `ReadProcessMemory`/`WriteProcessMemory`, which the kernel range-checks and which
+   return FALSE instead of raising. A VEH + `setjmp`/`longjmp` guard exists only for
+   the partial-range case; it is deliberately not the primary path, because
+   `longjmp` out of a vectored exception handler is not a supported x64 unwinding
+   path. No exception may ever propagate into the game.
 3. **No exceptions, no CRT heap churn in hot paths.** Build with `-fno-exceptions`.
    Never log or allocate from inside a detour.
 4. **Dry-run by default when unsure.** If `RequireVerifiedOffsets=1` (default) and
@@ -85,7 +92,7 @@ Every test lives in its own `tools/<name>/` directory and is picked up by `build
 
 * `src/core/config.h` — INI model, `Config::LoadFromFile`, `Config::Resolve(side,type)`.
 * `src/pn/pn.h` — `ComputeGuidance(input, params) -> GuidanceResult` (+ LOS helpers).
-* `src/mem/mem.h` — SEH-safe primitives & scanners.
+* `src/mem/mem.h` — fault-safe primitives & scanners.
 * `src/mem/discovery.h` — finds missile parameter tables / entities (contract below).
 * `src/hook/hook.h` — `hook::Install/Remove/Probe`.
 
@@ -157,7 +164,7 @@ of expressing it as an aim point.
   geometries; prints miss distances, hit rates, FOV losses. **69 assertions**; the only
   suite that also runs natively on a non-Windows host.
 * `memtest` — synthesises a fake memory image (parameter table + entities) and
-  checks the correlator finds exactly it, plus SEH-safe read/write behaviour
+  checks the correlator finds exactly it, plus fault-safe read/write behaviour
   (including cross-page protection restore).
 * `hooktest` — hooks functions in-process, validates trampoline + refusal rules, and
   pins the entry bytes of every hook target the mod installs.
@@ -224,7 +231,7 @@ Hard guards that were added after testing:
 * a staleness guard remembers what we wrote: if a row no longer holds either the vanilla
   value or our own value, the game reloaded its data and we drop all rows and rediscover
   instead of writing into freed memory;
-* every write is read-back verified; `DryRun`, `RequireVerifiedOffsets` and the SEH-guarded
+* every write is read-back verified; `DryRun`, `RequireVerifiedOffsets` and the fault-safe
   read/write layer make "nothing found" a no-op instead of a crash.
 
 ### Enemy / wingman separation

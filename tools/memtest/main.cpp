@@ -408,7 +408,7 @@ static void Trace(const char* what) {
 }
 
 void TestReadSafety() {
-    TestScope t("SEH-safe ReadBytes");
+    TestScope t("fault-safe ReadBytes");
     uint8_t buf[64] = {};
     Trace("ReadBytes(0, buf, 4)");
     Check(!acz::mem::ReadBytes(0, buf, 4), "ReadBytes(null) == false");
