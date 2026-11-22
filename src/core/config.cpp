@@ -224,7 +224,8 @@ bool IsKnownRuntimeKey(const std::string& key) {
            key == "entityveloffset" || key == "targetposoffset" || key == "targetveloffset" ||
            key == "forceoffsets" || key == "hookrva" || key == "hooksignature" || key == "hookargindex" ||
            key == "entityoverride" || key == "leadscale" || key == "leadmode" || key == "ringsurvey" ||
-           key == "hwwatch" || key == "hwwatchseconds" || key == "pngain";
+           key == "hwwatch" || key == "hwwatchseconds" || key == "pngain" ||
+           key == "terminalzone" || key == "terminalhandback" || key == "handback";
 }
 
 // ===========================================================================
