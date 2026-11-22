@@ -11,12 +11,15 @@
 #   2. reads the version from `kVersion` in src/core/mod.cpp - the single source of
 #      truth - and packages the flat release zip,
 #   3. tags `v<version>` if the tag does not exist yet,
-#   4. creates the GitHub Release, or updates the existing one in place if the tag
-#      already existed (re-releasing the same version is legitimate: a merge that
-#      only fixes packaging or docs should not need a version bump).
+#   4. publishes the GitHub Release - but ONLY if kVersion names a version that does
+#      not have a tag yet.
 #
-# Re-running: the workflow is idempotent. If a Release for the tag exists, its
-# asset is replaced. Use workflow_dispatch to re-run deliberately.
+# Why the tag check decides whether to publish: main also receives merges that do
+# not change the binary (docs, CI, packaging). Publishing those would replace the
+# asset of an already-released version, silently changing its SHA-256 and rewriting
+# its notes. So a push to main without a version bump builds and tests everything
+# and then stops. To republish an existing version on purpose (the repair path for
+# a bad build), run this workflow manually - workflow_dispatch skips the gate.
 # =============================================================================
 name: Release
 
@@ -74,6 +77,33 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
 
+      # Only a NEW version is published automatically. A push to main that does not
+      # bump kVersion (docs, CI, packaging tweaks) must not re-cut the existing
+      # release: replacing the asset silently changes the published zip's SHA-256
+      # under a version number that users already have, and the notes would be
+      # rewritten from whatever RELEASE_NOTES.md happens to say now.
+      #
+      # Re-releasing deliberately is still possible - run this workflow by hand
+      # (workflow_dispatch), which is the documented escape hatch for repairing a
+      # bad build. That is the difference between "a merge happened" and "someone
+      # decided to republish".
+      - name: Decide whether this version should be published
+        id: gate
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              echo "tag $TAG exists, but this is a manual run: re-releasing it."
+            else
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::tag $TAG already exists and kVersion was not bumped - building and testing only, NOT publishing. Bump kVersion to release, or run this workflow manually to republish deliberately."
+            fi
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "tag $TAG does not exist: this will be a new release."
+          fi
+
       # Same gate as ci.yml: if the tests fail, nothing is published.
       - name: Build and run all offline tests
         run: ./build.sh test
@@ -95,7 +125,7 @@ jobs:
           echo "sha256: $SHA"
 
       - name: Create tag if missing
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.gate.outputs.publish == 'true' }}
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -107,7 +137,7 @@ jobs:
           fi
 
       - name: Publish (or update) the GitHub Release
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.gate.outputs.publish == 'true' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,6 +181,8 @@ jobs:
             echo "| sha256 | \`${{ steps.sum.outputs.sha256 }}\` |"
             if [ "${{ inputs.dry_run }}" = "true" ]; then
               echo "| published | **no** (dry run) |"
+            elif [ "${{ steps.gate.outputs.publish }}" != "true" ]; then
+              echo "| published | **no** (tag \`${{ steps.ver.outputs.tag }}\` already exists - bump kVersion) |"
             else
               echo "| published | yes |"
             fi

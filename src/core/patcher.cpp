@@ -1000,8 +1000,11 @@ void Patcher::ProbeRingSample() {
                         static_cast<unsigned long long>(base), ringSamples_, reported, line);
                 // NOTE: the PAGE_GUARD write-watch was disabled after it crashed the
                 // game (2026-10-26 00:32:28, exception 0x80000001 in ntdll - an
-                // unhandled guard-page violation escaping our VEH). Probe mode is
-                // read-only again; do not re-enable without a safer mechanism.
+                // unhandled guard-page violation). It is currently unreachable:
+                // ArmPageGuard() has no callers, so its AczGuardVeh is never even
+                // installed. Keep it that way unless you have a mechanism that cannot
+                // fault - the memory layer in src/mem/mem.cpp deliberately has no
+                // exception handling at all (see the comment above CopyFromTarget).
             }
             prev = cur;
         }

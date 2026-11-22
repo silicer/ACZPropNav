@@ -6,6 +6,7 @@
 // it must reach the discovery stage, log the outcome and keep the process alive.
 #include <windows.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -89,13 +90,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Assert the banner SHAPE, not a hard-coded version: this check used to look for
-    // "ACZPropNav 1.0.0" and silently went stale at the 1.0.1 bump (it was masked by
-    // the memtest segfault for several CI runs). The literal below is a digit, so any
-    // version string from Log::Banner() satisfies it without needing a bump here.
+    // Assert the banner SHAPE, not a hard-coded version. Two earlier forms of this
+    // check went stale: an exact "ACZPropNav 1.0.0" (broke at the 1.0.1 bump, and was
+    // MASKED for several CI runs by the memtest segfault), then an enumeration of
+    // leading digits 0-3 (would break at 4.x). Now: the prefix, then a digit, then a
+    // dot - no list to keep in sync with the major version.
     {
-        const bool banner = Contains(log, "ACZPropNav 0.") || Contains(log, "ACZPropNav 1.") ||
-                            Contains(log, "ACZPropNav 2.") || Contains(log, "ACZPropNav 3.");
+        bool banner = false;
+        const std::string prefix = "ACZPropNav ";
+        for (size_t at = log.find(prefix); at != std::string::npos;
+             at = log.find(prefix, at + 1)) {
+            size_t i = at + prefix.size();
+            if (i >= log.size() || !std::isdigit(static_cast<unsigned char>(log[i]))) continue;
+            while (i < log.size() && std::isdigit(static_cast<unsigned char>(log[i]))) ++i;
+            if (i < log.size() && log[i] == '.') { banner = true; break; }
+        }
         check(banner, "log contains the version banner");
     }
     check(Contains(log, "配置文件 / config:"), "log names the config file");

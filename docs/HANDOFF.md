@@ -356,9 +356,19 @@ Segmentation fault
    而不在我们线程里抛异常**。
 2. `g_isSelf && EnsureGuard()` 的 VEH 路径降级为**只处理"部分可读范围"**的兜底
    （内核会因为范围里有一页不可读而整体拒绝，这时再用 guard 取回合法字节，
-   保持旧行为）。
+   保持旧行为）。→ **这一步后来被证明是错的，已在第二轮评审后彻底删除。**
 3. `t_frame` 改 `thread_local GuardFrame* volatile`，并在两次 `memcpy` 前后加
    `__sync_synchronize()`，保证帧在故障发生前已真实写入内存。
+
+> **后续（2026-11-22 评审）+ 修正**：上面第 2 步的"部分可读范围兜底"**不能成立**。
+> `GuardedRead` 一旦真的触发 fault 就 `return false`，而 `ReadProcessMemory` 对**同一批
+> 地址**也是 `return false` —— 两者结果**完全等价**，兜底没换来任何行为差异，只是把
+> "在游戏线程里抛一个真实硬件异常"重新放回了路径上。所以整个 VEH / `setjmp` /
+> `longjmp` 机制连同 `EnsureGuard`、`t_frame`、`GuardFrame`、`g_isSelf`、`ArmWindow`、
+> `AczGuardHandler`、`<csetjmp>`、`ACZ_NOINLINE`、`kGuardPageViolation` 已**全部删除**。
+> `CopyFromTarget/CopyToTarget` 现在就是两行内核调用，没有任何回退分支。
+> 这就是"部分可读范围"的真正处理方式：**整体拒绝**。对本模组是安全的 —— 所有调用方
+> 都用返回值判断，没有一个依赖"部分字节可用"。
 
 **代价核算**（按真实会话的计数，不是猜的）：13707 次 `Apply()` / ~505 s，
 10755 次活槽遍历，每槽约 10 次读 ⇒ **约 213 次内核拷贝/秒**。按 1–2 µs 计
@@ -429,3 +439,106 @@ ACZero\ACZPropNav\ACZPropNav.dll     ← 也就永远不会加载
 **教训**：打包脚本"跑成功"不等于"产物可用"。原来的校验只对比了成员**文件名集合**
 （用 `sed 's#^ACZPropNav/##'` 把前缀剥掉再比），**恰好把包装目录这一层掩盖了** ——
 校验逻辑自己把要检的东西规范化掉了。现在的断言直接看原始 `unzip -Z1` 输出。
+
+### 16.9 第二轮评审：五条意见逐条核实的结果
+
+用户转来一份针对 `dev` 的审核报告（5 条）。**逐条验证后：4 条成立并已修，1 条前提有误但
+方向正确、且暴露了一个更严重的问题。**
+
+#### ① 高优先级：`CopyFromTarget`/`CopyToTarget` 仍保留 VEH+`longjmp` 回退 —— **成立，已彻底删除**
+
+评审说的没错，但**实际比评审描述的更严重**：那条"部分可读范围兜底"**根本不可能有收益**。
+
+```cpp
+// 旧代码
+if (g_isSelf && EnsureGuard()) return GuardedRead(dst, src, n);
+// GuardedRead 一旦真的 fault 就 return false
+// ReadProcessMemory 对同一批地址也是 return false
+// => 两者结果完全等价
+```
+
+也就是说兜底没换来任何行为差异，只是把"在游戏线程里抛一个真实硬件异常"重新放回路径上。
+`ReadProcessMemory` 返回 `FALSE` + `ERROR_PARTIAL_COPY` 时**本来就能拿到有效前缀字节数**
+（`lpNumberOfBytesRead`），完全不需要 `memcpy` 去撞异常。
+
+**处置**：整个 VEH / `setjmp` / `longjmp` 机制**全部删除** —— `EnsureGuard`、`t_frame`、
+`GuardFrame`、`ArmWindow`、`AczGuardHandler`、`g_isSelf`、`g_guardState`、`<csetjmp>`、
+`ACZ_NOINLINE`、`kGuardPageViolation` 一个不留。现在就是两行内核调用：
+
+```cpp
+bool CopyFromTarget(void* dst, uintptr_t src, size_t n) {
+    EnsureProcess();
+    SIZE_T got = 0;
+    return ReadProcessMemory(g_hProcess, reinterpret_cast<LPCVOID>(src), dst, n, &got) != FALSE &&
+           got == n;
+}
+```
+
+"部分可读范围"的正确处理就是**整体拒绝** —— 对本模组安全，因为所有调用方都用返回值判断，
+没有一个依赖"部分字节可用"。`memtest` 的用例名也从"VEH guard declines…"改成
+"a foreign fault is never absorbed by the memory layer"（现在证明的是更强的性质：
+mem:: 根本没注册处理器）。
+
+顺带发现 `src/core/patcher.cpp` 里还有**另一处 VEH**（`AczGuardVeh`，page-guard 写监视），
+`ArmPageGuard()` **没有调用者**，所以它从未被安装过 —— 是死代码。注释已改为如实说明。
+
+#### ② 中优先级：同版本号重复触发 Release 覆盖 —— **成立，已修**
+
+这正是我在升 1.0.2 时手动躲过的那个隐患：当时 `kVersion` 还是 1.0.1、tag `v1.0.1` 已存在，
+合并 main 会走 `upload --clobber` **原地覆盖已发布资产**。我靠升版本号绕开了，但**触发机制还在**。
+
+**修法**：`release.yml` 新增 `Decide whether this version should be published` 步骤（`id: gate`）：
+
+```bash
+if git rev-parse "$TAG" >/dev/null 2>&1; then
+  if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then publish=true   # 手动=故意重发
+  else publish=false                                                          # 普通合并=只构建不发布
+  fi
+else publish=true
+fi
+```
+
+`Create tag` 与 `Publish` 两步的 `if` 都加上 `steps.gate.outputs.publish == 'true'`。
+摘要表也会写明"未发布（tag 已存在，请升 kVersion）"。这样：
+**普通合并 + 没升版本 = 构建测试但不发布；确实要重发就得手动 `workflow_dispatch`。**
+`docs/RELEASING.md` 同步改写。
+
+#### ③ 中优先级：smoke 硬编码主版本号 —— **成立，已修**
+
+上一轮我把 `"ACZPropNav 1.0.0"` 改成枚举 `0.`/`1.`/`2.`/`3.`，评审指出 4.x 又会失效。
+现在改成**结构性匹配**：找到 `"ACZPropNav "` 前缀后要求紧跟"至少一位数字 + `.`"，
+没有任何版本清单要维护。
+
+#### ④ 低优先级：`docs/RELEASING.md` 重复标题 —— **成立，已修**
+
+第 113/115 行确实有两个 `### Where the binary comes from`，删掉一个。
+
+#### ⑤ 低优先级：目标瞬移当帧 `Vt` 归零而非截断 —— **方向对，但前提错了，且牵出一个真 bug**
+
+评审建议"把 `vtLen > kMaxTargetStep` 时的 `Vt` 直接归零而非截断到 20"，理由是这样会
+"产生虚假速度尖峰"。**结论我采纳了**（归零比截断更诚实：跳变的方向不携带目标去向信息），
+但**评审的数值前提是错的** —— 它接受了代码注释里的 `20 m/frame == 1200 m/s`。
+
+**位置单位不是米。** 我用真实日志交叉验证过：
+
+```text
+日志 partPos=(-35789.3 2466.3 -17576.6)  targetPos=(-39020.3 2319.3 -23449.7)
+两点原始距离            = 6704.8
+同帧报告的 |R|          = 6705
+比值                    = 1.0000   ← 全程没有任何 5.12 换算
+```
+
+所以 `20.f` 是 **20 位置单位/帧 ≈ 234 m/s**，不是 1200 m/s。真实目标（600–900 m/s）的
+每帧位移是 51–77 单位，**每一帧都超阈值** ⇒ 速度被砍到 234 m/s（方向保留、大小严重低估），
+而且 `velSmoothValid` 每帧被清 ⇒ **EMA 平滑形同虚设**。
+
+**修法**：新增 `msl_steer::SanitizeTargetStep(step, maxUnitsPerFrame, out)`（纯函数、可测），
+边界按诚实单位计算 `1200 m/s / 60 * 5.12 ≈ 102.4 units/frame`；超范围或非有限值 ⇒
+`out` 置零并返回 false，调用方同时清 EMA 历史。回归断言 (k15a)–(k15f)，
+其中 (k15b) 直接钉住"600 m/s 的位移 51.2 单位 > 旧的 20 单位边界"这个事实。
+
+顺带把 `rmin` 的注释也校准了：`25.0f` 是 25 单位 ≈ 4.9 m 而非 25 m，但对任何真实导弹
+`2*|v|`（≈121 单位 ≈ 23.6 m）都占主导，所以只是注释错误，不是行为 bug。
+
+**教训**：注释里的单位也是断言。`20 m/frame == 1200 m/s` 这句注释从写下那天就是错的，
+而它让代码看起来"合理"，于是连续两轮评审都没质疑它，直到有人去核对日志里的原始坐标。

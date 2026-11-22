@@ -4,8 +4,9 @@
 // run collects.  Safety rules obeyed here:
 //   * the two detours never allocate, never take a lock, never log: fixed arrays
 //     + Interlocked only;
-//   * every read of game memory goes through mem::Read* / mem::ReadBytes (fault-safe
-//     guarded by the mem engine) and every pointer is validated before use;
+//   * every read of game memory goes through mem::Read* / mem::ReadBytes (kernel-
+//     mediated by the mem engine, so a bad address returns false instead of
+//     faulting) and every pointer is validated before use;
 //   * no writes to game memory except the two code patches themselves; no
 //     PAGE_GUARD, no pointer chasing, no new threads;
 //   * every heavy pass is bounded (byte budget, hit caps, iteration caps) and the

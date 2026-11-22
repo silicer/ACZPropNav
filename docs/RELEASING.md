@@ -106,11 +106,12 @@ gh release create vX.Y.Z dist/ACZPropNav-X.Y.Z-win64.zip \
 Attach **one asset**: the zip. Do not also attach loose DLLs (users get confused about
 which layout works) and do not commit `dist/` (gitignored).
 
-**Re-releasing the same version** is legitimate (e.g. a packaging or docs fix): the
-workflow finds the existing tag/release and replaces the asset and notes rather than
-failing. Bump `kVersion` when the binaries actually change.
-
-### Where the binary comes from
+**Re-releasing the same version** is a deliberate act, not something an ordinary
+merge does. A push to `main` only publishes when `kVersion` names a version without a
+tag; otherwise the workflow builds, tests and stops (and says so in its summary).
+To republish an existing version on purpose - the repair path for a bad build - run
+the release workflow manually (`workflow_dispatch`). Bump `kVersion` whenever the
+binaries change.
 
 ### Where the binary comes from
 

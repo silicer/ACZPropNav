@@ -66,15 +66,20 @@ Every test lives in its own `tools/<name>/` directory and is picked up by `build
    (live mask bit + the object at `ctrl` is a weapon controller) before the PN hooks write
    it; the static-parameter path only writes rows a locator proved (or the user forced with
    `ForceOffsets=1`).
-2. **Every dereference is fault-safe, but NOT via `__try/__except`.** The MinGW-w64
-   toolchain does not emit a Microsoft exception handler for `__try/__except` (no
-   `__C_specific_handler`, no `.xdata` funclet), so a real access violation would
-   propagate as an unhandled AV. Reads/writes therefore go through
-   `ReadProcessMemory`/`WriteProcessMemory`, which the kernel range-checks and which
-   return FALSE instead of raising. A VEH + `setjmp`/`longjmp` guard exists only for
-   the partial-range case; it is deliberately not the primary path, because
-   `longjmp` out of a vectored exception handler is not a supported x64 unwinding
-   path. No exception may ever propagate into the game.
+2. **Every dereference is fault-safe, and nothing here is exception-based.** Reads and
+   writes go through `ReadProcessMemory`/`WriteProcessMemory`, which range-check in the
+   kernel and return FALSE instead of raising in our thread.
+   * There is **no `__try/__except`**: the MinGW-w64 toolchain does not emit a Microsoft
+     exception handler for it (no `__C_specific_handler`, no `.xdata` funclet), so a real
+     access violation would propagate as an unhandled AV. A safety construct that
+     silently does nothing is worse than a documented absence.
+   * There is **no VEH handler and no `setjmp`/`longjmp` either**. An earlier design used
+     exactly that around a raw `memcpy`; it died on the first bad read, because `longjmp`
+     out of a vectored exception handler is not a supported x64 unwinding path. It was
+     also pointless as a "partial range" fallback: it returned FALSE on the same ranges
+     the kernel refuses, so all it added was a real hardware fault thrown inside the
+     game's thread. See `src/mem/mem.cpp` for the full history.
+   * No exception may ever propagate into the game.
 3. **No exceptions, no CRT heap churn in hot paths.** Build with `-fno-exceptions`.
    Never log or allocate from inside a detour.
 4. **Dry-run by default when unsure.** If `RequireVerifiedOffsets=1` (default) and

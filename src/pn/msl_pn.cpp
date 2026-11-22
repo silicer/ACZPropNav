@@ -747,21 +747,33 @@ void Apply(void* ctrl) {
                 te->frame = g.frameId;
                 te->valid = true;
             }
-            // A mission restart / object-slot recycle makes the target position jump
-            // discontinuously. Clamping keeps the velocity sane, but a single huge
-            // jump still poisons the EMA for several frames, so treat an over-range
-            // step as "position teleported": drop the smoothed estimate too.
-            const float kMaxTargetStep = 20.f;  // 20 m/frame == 1200 m/s
-            float vtLen = Length(Vt);
-            if (vtLen > kMaxTargetStep) {
-                // Over-range step: either a genuinely absurd sample or a teleport (mission
-                // restart, object slot recycled for a different aircraft). Clamp it AND
-                // throw away the smoothed history, so a single jump cannot keep biasing
-                // the lead point for the next several frames via the EMA.
-                Vt = Vt * (kMaxTargetStep / vtLen);
-                vtLen = kMaxTargetStep;
+            // A mission restart or a recycled object slot makes the target position
+            // jump discontinuously; a real aircraft cannot. Tell them apart by the
+            // step length.
+            //
+            // UNITS: Vt is a per-frame displacement in the game's POSITION UNITS, the
+            // same unit as the slot positions (see the file header of msl_steer.h -
+            // 1 m == 5.12 units). The old bound here was `20.f` with a comment calling
+            // it "20 m/frame == 1200 m/s", which conflated the two: 20 units/frame is
+            // only ~234 m/s, so EVERY target faster than that tripped the clamp every
+            // frame, lost its true speed, and had its EMA history reset each time
+            // (velSmoothValid was cleared). Bound below is expressed in the honest
+            // unit: 1200 m/s at 60 fps == 20 m/frame == 102.4 units/frame.
+            constexpr float kPosUnitsPerMetre = 5.12f;
+            constexpr float kMaxTargetSpeedMps = 1200.f;   // generous; no aircraft is this fast
+            constexpr float kMaxTargetStep =
+                kMaxTargetSpeedMps / 60.f * kPosUnitsPerMetre;   // ~102.4 units/frame
+            Vec3 step;
+            if (!msl_steer::SanitizeTargetStep(Vt, kMaxTargetStep, step)) {
+                // Teleport or a non-finite sample: the direction of a jump says nothing
+                // about where the target is heading, so treat velocity as UNKNOWN for
+                // this frame rather than a clamped (still teleport-pointing) vector.
+                // Drop the smoothed history too, or one jump keeps biasing the lead
+                // point for the next several frames through the EMA.
+                step = Vec3();
                 te->velSmoothValid = false;
             }
+            Vt = step;
             if (te->velSmoothValid) {
                 Vt = te->velSmooth * 0.6f + Vt * 0.4f;
             } else {

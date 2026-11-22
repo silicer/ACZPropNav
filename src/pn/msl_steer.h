@@ -239,6 +239,29 @@ struct PnOutput {
     bool valid = false;
 };
 
+// ---------------------------------------------------------------------------
+// Target per-frame step sanity
+// ---------------------------------------------------------------------------
+// A real target's per-frame displacement is bounded by its speed; a mission restart
+// or a recycled object slot instead produces a discontinuous jump. The two must be
+// told apart, because a jump fed into the velocity estimate poisons the lead point
+// for many frames.
+//
+// The caller passes a bound in the SAME units as the positions (the game's position
+// units - see the file header - not metres), so this function cannot get the scale
+// wrong. On an out-of-range step it returns false and clears `out`: the DIRECTION of
+// a jump carries no information about where the target is going, so treating the
+// velocity as unknown for that frame is more honest than keeping a clamped value
+// (which would still point in the direction of the teleport).
+//
+// A NaN/inf step is also reported as out of range - it must never reach the maths.
+inline bool SanitizeTargetStep(const Vec3& step, float maxUnitsPerFrame, Vec3& out) {
+    const float len = Length(step);
+    const bool usable = std::isfinite(len) && len <= maxUnitsPerFrame;
+    out = usable ? step : Vec3();
+    return usable;
+}
+
 // Rotate a unit vector about a unit axis by `angle` rad (Rodrigues).
 inline Vec3 RotateAboutAxis(const Vec3& v, const Vec3& axisUnit, float angle) {
     if (!(std::fabs(angle) > 1e-9f)) return v;
@@ -268,6 +291,13 @@ inline bool ComputePn(const PnInput& in, PnOutput& out) {
 
     // Soft singularity guard: below rmin the LOS rate would explode; clamping r^2
     // replaces the old 1200 m / 250 m terminal hardcodes from Step 1.
+    //
+    // Everything here is in the game's position units (1 m == 5.12 units), so the
+    // `25.0f` floor means ~4.9 m, not 25 m. That is intentional-but-cosmetic: for any
+    // real missile 2*|v| dominates (|v| ~ 60 units/frame => 121 units => ~23.6 m), so
+    // the floor only matters for a very slow missile, where the smaller radius is
+    // also the correct one - it must stay proportional to the step the missile
+    // actually takes in one frame.
     const float rmin = (2.0f * speed > 25.0f) ? (2.0f * speed) : 25.0f;
     const float r2 = (r * r > rmin * rmin) ? (r * r) : (rmin * rmin);
 

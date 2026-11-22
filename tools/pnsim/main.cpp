@@ -1339,6 +1339,51 @@ void TestPn() {
               "(k14c) that turn is non-zero and rate limited", "");
     }
 
+    // (k15) REGRESSION: the target-step sanity bound must be expressed in POSITION
+    // UNITS, and it must reject a teleport rather than clamp-and-keep its direction.
+    //
+    // The live game stores positions in units where 1 m == 5.12 units (proven by the
+    // engine's range kill at 0x1402D46B0, and cross-checked against a real log: the
+    // distance between two logged position vectors was 6704.8 while the same frame
+    // printed |R| = 6705, i.e. no 5.12 factor is applied anywhere in this path). The
+    // old bound was `20.f` commented as "20 m/frame == 1200 m/s"; but 20 units/frame
+    // is only ~234 m/s, so every real target exceeded it EVERY frame, had its speed
+    // under-estimated, and had its EMA history reset each time.
+    {
+        using msl_steer::SanitizeTargetStep;
+        const float kUnitsPerMetre = 5.12f;
+        const float kMaxSpeedMps = 1200.f;
+        const float bound = kMaxSpeedMps / 60.f * kUnitsPerMetre;   // ~102.4 units/frame
+
+        // A 600 m/s target moves 51.2 units/frame: comfortably inside the bound, yet
+        // it was over the OLD 20-unit bound. This is the assertion that pins the bug.
+        const float realStep = 600.f / 60.f * kUnitsPerMetre;       // 51.2
+        Vec3 out;
+        const bool kept = SanitizeTargetStep(Vec3(realStep, 0, 0), bound, out);
+        Check(kept && std::fabs(Length(out) - realStep) < 1e-4f,
+              "(k15a) a 600 m/s target's step is kept, not clamped away",
+              Fmt("len=%.3f", static_cast<double>(Length(out))));
+        Check(realStep > 20.f,
+              "(k15b) ...and it IS above the old hard-coded 20-unit bound (the bug)",
+              Fmt("step=%.2f units/frame", static_cast<double>(realStep)));
+
+        // 1200 m/s exactly at the bound must survive; slighly beyond must not.
+        const bool atBound = SanitizeTargetStep(Vec3(bound, 0, 0), bound, out);
+        Check(atBound, "(k15c) a step exactly at the bound is accepted", "");
+        const bool beyond = SanitizeTargetStep(Vec3(bound * 1.5f, 0, 0), bound, out);
+        Check(!beyond && Length(out) == 0.f,
+              "(k15d) a teleport is rejected and yields a ZERO vector, not a clamped one",
+              Fmt("kept=%d len=%.3f", beyond ? 1 : 0, static_cast<double>(Length(out))));
+
+        // Non-finite samples must never reach the guidance maths.
+        const float inf = std::numeric_limits<float>::infinity();
+        Check(!SanitizeTargetStep(Vec3(inf, 0, 0), bound, out) && Length(out) == 0.f,
+              "(k15e) an infinite step is rejected as unknown", "");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        Check(!SanitizeTargetStep(Vec3(nan, nan, nan), bound, out) && Length(out) == 0.f,
+              "(k15f) a NaN step is rejected as unknown", "");
+    }
+
     // (k13) The rmin guard must bound lambda-dot through the whole terminal phase.
     // This is the invariant that makes the old 30 m "terminal hand-back" unnecessary:
     // a real ACZ MSL steps ~16.7 m/frame, so rmin = max(2*|v|, 25) = 33.3 m and the

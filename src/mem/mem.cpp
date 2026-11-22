@@ -1,48 +1,22 @@
 // ACZPropNav - fault-safe process memory primitives, region enumeration, scanners.
 //
 // Everything here is designed to be safe inside a live, Steam-DRM-wrapped game:
-//  - every raw dereference goes through a fault guard (see "fault guard" below),
+//  - every read/write of an untrusted address is kernel-mediated
+//    (ReadProcessMemory/WriteProcessMemory) and therefore cannot crash the caller,
 //  - scans only touch committed, readable memory that VirtualQueryEx reports,
 //  - writes re-protect the page, write, restore, flush icache when exec,
 //  - writes are alignment/size checked and hard-capped.
 //
 // ---------------------------------------------------------------------------
-// Fault strategy: kernel first, exception recovery only as a last resort
+// Fault strategy: the kernel is the only guard
 // ---------------------------------------------------------------------------
-// Reads and writes go through ReadProcessMemory/WriteProcessMemory, which the kernel
-// range-checks and which return FALSE rather than raising in our thread.  The VEH +
-// setjmp/longjmp guard described below is only used for the bytes a partially
-// readable range needs, and is deliberately not the normal path: longjmp out of a
-// VEH handler is not a supported unwinding path on x64, and provoking hardware
-// faults inside the game's own thread thousands of times per second is not
-// something to rely on.
+// ReadProcessMemory/WriteProcessMemory range-check in the kernel and return FALSE
+// rather than raising in our thread.  That is sufficient: this file has no VEH
+// handler, no setjmp/longjmp and no `__try/__except` (see the long comment above
+// CopyFromTarget for why each of those was removed or never worked here).
 //
-// ---------------------------------------------------------------------------
-// Why there is no `__try/__except` in this file
-// ---------------------------------------------------------------------------
-// The repository toolchain is `x86_64-w64-mingw32-g++` which on this machine is
-// clang 23 targeting x86_64-w64-windows-gnu.  That target *parses*
-// `__try`/`__except` when -fms-extensions is given, but it does NOT emit a
-// Microsoft exception handler for it: the generated module contains no
-// `__C_specific_handler` reference, no .xdata funclet and no `.seh_handler`
-// directive, and an actual access violation is not caught (verified with a
-// runtime probe; the crash propagates as an unhandled AV).  Silently dropping a
-// safety construct is the worst possible outcome, so this file uses the
-// sanctioned fallback instead:
-//
-//   one process-wide AddVectoredExceptionHandler() + a thread-local
-//   setjmp/longjmp frame around each copy.
-//
-// The frame is only "armed" while we are inside our own memcpy, on our own
-// thread, so faults in game code (or in other threads) are always passed
-// through with EXCEPTION_CONTINUE_SEARCH: the mod never swallows a game crash.
-// The handler is installed lazily on first use and never removed (process
-// lifetime).  If the handler cannot be installed (exotic environment) every
-// primitive falls back to ReadProcessMemory/WriteProcessMemory, which are
-// kernel-mediated and cannot crash the caller either.
-//
-// Tests: tools/memtest/main.cpp exercises null/invalid/guard-page/boundary
-// faults through these primitives, plus a 200-fault stress loop.
+// Tests: tools/memtest/main.cpp exercises null/invalid/guard-page/boundary faults
+// through these primitives, plus a 200-fault stress loop.
 #include "mem/mem.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -54,7 +28,6 @@
 #include <windows.h>
 #include <psapi.h>
 
-#include <csetjmp>
 #include <cstdio>
 #include <cstring>
 
@@ -62,16 +35,6 @@
 // revisions / docs use ..._UNCHANGED_REFS.  Define it defensively.
 #ifndef GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
 #define GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT 0x00000002
-#endif
-
-// ---------------------------------------------------------------------------
-// noinline helper: keep the setjmp frame in its own function so the compiler
-// cannot fold the guarded copy into a caller that longjmps across objects.
-// ---------------------------------------------------------------------------
-#if defined(_MSC_VER)
-#define ACZ_NOINLINE __declspec(noinline)
-#else
-#define ACZ_NOINLINE __attribute__((noinline))
 #endif
 
 namespace acz::mem {
@@ -90,16 +53,11 @@ constexpr size_t kMaxTransfer = 64u * 1024u;
 // copy per chunk instead of one guarded call per byte.
 constexpr size_t kScanChunk = 256u * 1024u;
 
-// KUSER_SHARED_DATA / PAGE_GUARD violations arrive as this code (ntstatus.h is
-// not included on purpose: MinGW's windows.h does not pull it in cleanly).
-constexpr DWORD kGuardPageViolation = 0x80000001u;
-
 // ---------------------------------------------------------------------------
 // Process / module state
 // ---------------------------------------------------------------------------
 
 void* g_hProcess = nullptr;   // target process handle (current process by default)
-bool g_isSelf = true;         // true when g_hProcess == GetCurrentProcess()
 
 bool g_mainInit = false;
 ModuleInfo g_main;
@@ -109,7 +67,6 @@ char g_moduleAnchor = 0;      // address inside our own module (fallback lookup)
 void EnsureProcess() {
     if (!g_hProcess) {
         g_hProcess = GetCurrentProcess();
-        g_isSelf = true;
     }
 }
 
@@ -119,160 +76,57 @@ void ResetModuleCache() {
 }
 
 // ---------------------------------------------------------------------------
-// Fault guard
+// Verified copy: kernel-mediated, never exception-based
 // ---------------------------------------------------------------------------
 //
-// A frame holds the page-rounded address window of the copies that are allowed
-// to fault for it.  Rounding to pages (instead of the exact byte range) is
-// required for correctness: the CRT's memcpy is free to move data in machine
-// words inside the pages it copies from, and a page-aligned window covers those
-// accesses.  Anything outside the window (different thread, game code, a bug in
-// our own buffer handling) is passed through untouched, so the mod can never
-// swallow a crash that belongs to the game.
-
-struct GuardFrame {
-    jmp_buf jb;
-    GuardFrame* prev;
-    uintptr_t lo;   // page-aligned start of the only addresses this frame may recover
-    uintptr_t hi;   // page-aligned end (exclusive)
-};
-
-// VOLATILE is load-bearing, not style.  The handler runs on this same thread from
-// inside an exception, so it re-reads this pointer from memory while the faulting
-// memcpy is still on the stack.  If the compiler is allowed to keep it in a
-// register (or to sink the store below the memcpy, which it may do because the
-// memcpy is an intrinsic it can reason about), the handler sees a stale or null
-// frame and declines the fault - so the access violation propagates and the
-// process dies.  That is exactly what the Windows CI run showed: the very first
-// deliberately-faulting read (ReadBytes(1, buf, 4)) segfaulted instead of
-// returning false.  In-game it stayed hidden only because every pointer the mod
-// read in those sessions happened to be valid, so no fault ever fired.
-thread_local GuardFrame* volatile t_frame = nullptr;
-volatile LONG g_guardState = 0;  // 0 = uninitialised, 1 = installing, 2 = ready, 3 = unavailable
-
-uintptr_t PageSize() {
-    SYSTEM_INFO si{};
-    GetSystemInfo(&si);
-    return si.dwPageSize ? si.dwPageSize : 0x1000u;
-}
-
-// Page window covering every page touched by [addr, addr+n).  n must be > 0.
-void ArmWindow(GuardFrame& f, uintptr_t addr, size_t n) {
-    const uintptr_t ps = PageSize();
-    f.lo = addr & ~(ps - 1);
-    f.hi = ((addr + (n - 1)) & ~(ps - 1)) + ps;   // last touched page, inclusive
-}
-
-extern "C" LONG CALLBACK AczGuardHandler(EXCEPTION_POINTERS* ep) {
-    GuardFrame* frame = t_frame;   // volatile read: must happen before any test below
-    // No active guard on this thread -> not our fault: let the game handle it.
-    if (!frame) return EXCEPTION_CONTINUE_SEARCH;
-    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
-    const DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR &&
-        code != kGuardPageViolation) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    // The fault address is parameter 1 of both AV and in-page error records.
-    const uintptr_t faultAddr = (ep->ExceptionRecord->NumberParameters >= 2)
-                                    ? static_cast<uintptr_t>(ep->ExceptionRecord->ExceptionInformation[1])
-                                    : 0;
-    if (faultAddr < frame->lo || faultAddr >= frame->hi) {
-        // A fault outside the copy we armed: not ours, never absorb it.
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    longjmp(frame->jb, 1);  // never returns
-    return EXCEPTION_CONTINUE_SEARCH;  // unreachable; keeps the compiler happy
-}
-
-bool EnsureGuard() {
-    const LONG state = g_guardState;
-    if (state == 2) return true;
-    if (state == 3) return false;
-    if (InterlockedCompareExchange(&g_guardState, 1, 0) == 0) {
-        PVOID h = AddVectoredExceptionHandler(1 /* first handler */, &AczGuardHandler);
-        InterlockedExchange(&g_guardState, h ? 2 : 3);
-    } else {
-        // Another thread is installing; give it a moment (this is a one-shot path).
-        for (int i = 0; i < 200 && g_guardState == 1; ++i) Sleep(0);
-    }
-    return g_guardState == 2;
-}
-
-// Copy `n` bytes from a target address we do not trust into `dst`.  Only the
-// memcpy is inside the guard: nothing else can be masked by the handler.
-ACZ_NOINLINE bool GuardedRead(void* dst, uintptr_t src, size_t n) {
-    GuardFrame frame;
-    frame.prev = t_frame;
-    ArmWindow(frame, src, n);
-    if (setjmp(frame.jb) != 0) {   // faulted: frame is still ours, unwind it
-        t_frame = frame.prev;
-        return false;
-    }
-    t_frame = &frame;
-    __sync_synchronize();          // publish the frame before the faulting copy runs
-    std::memcpy(dst, reinterpret_cast<const void*>(src), n);
-    __sync_synchronize();
-    t_frame = frame.prev;
-    return true;
-}
-
-// Copy `n` bytes from `src` into a target address we do not trust.
-ACZ_NOINLINE bool GuardedWrite(uintptr_t dst, const void* src, size_t n) {
-    GuardFrame frame;
-    frame.prev = t_frame;
-    ArmWindow(frame, dst, n);
-    if (setjmp(frame.jb) != 0) {
-        t_frame = frame.prev;
-        return false;
-    }
-    t_frame = &frame;
-    __sync_synchronize();
-    std::memcpy(reinterpret_cast<void*>(dst), src, n);
-    __sync_synchronize();
-    t_frame = frame.prev;
-    return true;
-}
-
-// Kernel-mediated copy.  ReadProcessMemory/WriteProcessMemory validate the range
-// in the kernel and return FALSE instead of raising in our thread, so they cannot
-// crash the caller.  This is the PRIMARY path, not a fallback.
+// Every read and write of a possibly-bad address goes through
+// ReadProcessMemory/WriteProcessMemory.  They validate the range in the kernel and
+// return FALSE instead of raising an exception in our thread, so they cannot crash
+// the caller -- which is the whole point of this layer.
 //
-// It used to be the other way round: a VEH handler + setjmp/longjmp around a raw
-// memcpy, with these only as a fallback.  That design has two problems.  First,
-// longjmp out of a vectored exception handler on x64 is not something the Win32
-// longjmp is specified to survive: it unwinds the handler frame but not the
-// exception dispatcher's own bookkeeping, so the process commonly dies instead of
-// recovering - which is precisely what the Windows CI run showed on the very first
-// deliberately-faulting read.  Second, even when it "worked" it meant the mod
-// triggered and swallowed a real hardware fault thousands of times a second on the
-// game thread, which is not a thing to do inside someone else's process.
+// ---------------------------------------------------------------------------
+// Why this file has no VEH handler and no __try/__except
+// ---------------------------------------------------------------------------
+// HISTORY, so nobody re-adds it.  This used to be a raw memcpy wrapped in a
+// process-wide AddVectoredExceptionHandler() + setjmp/longjmp frame.  It crashed on
+// the very first deliberately-faulting read in CI (ReadBytes(1, buf, 4) killed the
+// process), for two independent reasons:
+//
+//   1. longjmp out of a vectored exception handler is not a supported unwinding
+//      path on x64.  It leaves the exception dispatcher's bookkeeping behind, so
+//      the process commonly dies instead of resuming.
+//   2. `t_frame` had to be made `volatile` to even be seen by the handler, because
+//      at -O2 the compiler may sink the store below the memcpy (an intrinsic it can
+//      reason about).
+//
+// It is tempting to keep the guard as a fallback "for the partially-readable case",
+// but it cannot help: GuardedRead returned false whenever the copy faulted, and
+// ReadProcessMemory returns false for exactly the same range.  The fallback thus
+// bought nothing and cost a real hardware fault thrown inside the game's own thread.
+// The two designs had identical results, and the kernel one cannot kill the process.
+//
+// There is also no `__try/__except`: this repository's toolchain
+// (x86_64-w64-mingw32-g++) does NOT emit a Microsoft exception handler for it.  The
+// generated module contains no `__C_specific_handler` reference, no .xdata funclet
+// and no `.seh_handler` directive, and a real access violation is not caught
+// (verified with a runtime probe).  A safety construct that silently misbehaves is
+// worse than a documented absence.
 //
 // Cost check, from a real session: 13707 Apply() calls over ~505 s, 10755 live-slot
 // iterations, ~10 reads each => ~213 kernel copies/s.  At 1-2 us each that is
 // 0.02-0.04 % of one core.  Correctness beats a microsecond.
-//
-// The guard is still kept for the one case the kernel cannot arbitrate (see
-// CopyFromTarget below), but it is no longer on the normal path.
 bool CopyFromTarget(void* dst, uintptr_t src, size_t n) {
     EnsureProcess();
     SIZE_T got = 0;
-    const BOOL ok = ReadProcessMemory(g_hProcess, reinterpret_cast<LPCVOID>(src), dst, n, &got);
-    if (ok != FALSE && got == n) return true;
-    // ReadProcessMemory refuses partially-readable ranges as a whole; retry under
-    // the in-process guard so a read that only grazes an unmapped page still
-    // returns the bytes that are valid, matching the old behaviour.
-    if (g_isSelf && EnsureGuard()) return GuardedRead(dst, src, n);
-    return false;
+    return ReadProcessMemory(g_hProcess, reinterpret_cast<LPCVOID>(src), dst, n, &got) != FALSE &&
+           got == n;
 }
 
 bool CopyToTarget(uintptr_t dst, const void* src, size_t n) {
     EnsureProcess();
     SIZE_T put = 0;
-    const BOOL ok = WriteProcessMemory(g_hProcess, reinterpret_cast<LPVOID>(dst), src, n, &put);
-    if (ok != FALSE && put == n) return true;
-    if (g_isSelf && EnsureGuard()) return GuardedWrite(dst, src, n);
-    return false;
+    return WriteProcessMemory(g_hProcess, reinterpret_cast<LPVOID>(dst), src, n, &put) != FALSE &&
+           put == n;
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +358,6 @@ void ForEachChunk(const Region& r, size_t overlap, Fn&& fn) {
 bool SetProcess(void* hProcess) {
     if (!hProcess) return false;
     g_hProcess = hProcess;
-    g_isSelf = (hProcess == GetCurrentProcess());
     ResetModuleCache();
     return true;
 }

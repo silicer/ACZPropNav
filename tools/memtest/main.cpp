@@ -399,9 +399,12 @@ void TestProcessAndModule() {
     Check(acz::mem::Hex(0x1234) == "0x1234", "Hex formatting");
 }
 
-// When MEMTEST_TRACE=1 each guarded call prints its name before it runs, so a
+// When MEMTEST_TRACE=1 each fault-safe call prints its name before it runs, so a
 // crash reports the exact operation that died. Off by default to keep the normal
-// output readable.
+// output readable. (This tracer is what located the 2026-11-22 segfault: the
+// memory layer used to be a raw memcpy wrapped in a VEH + longjmp frame, which
+// died on the first deliberately-bad read. It is now kernel-mediated, so these
+// calls cannot fault at all - the tracer stays as cheap insurance.)
 static const bool kTrace = (std::getenv("MEMTEST_TRACE") != nullptr);
 static void Trace(const char* what) {
     if (kTrace) std::printf("      [trace] %s\n", what);
@@ -455,7 +458,9 @@ void TestReadSafety() {
         VirtualFree(pages, 0, MEM_RELEASE);
     }
 
-    // Stress: many sequential faults must not destabilise the guard.
+    // Stress: hundreds of bad addresses in a row must all report false and must
+    // never fault. ReadProcessMemory rejects them in the kernel, so there is no
+    // exception to recover from and nothing to destabilise.
     int caught = 0;
     for (int i = 0; i < 200; ++i) {
         if (!acz::mem::ReadBytes(static_cast<uintptr_t>(i) * 16 + 8, buf, 8)) ++caught;
@@ -844,11 +849,12 @@ void TestCorrelateAndSnapshot() {
 }
 
 void TestGuardDoesNotSwallowForeignFaults() {
-    TestScope t("VEH guard declines faults outside the guarded copy");
-    // Make sure the mem guard is installed before we register the last-chance
-    // handler, so the handler order under test is "mem first, test last".
+    TestScope t("a foreign fault is never absorbed by the memory layer");
+    // The memory layer no longer installs a VEH handler at all, so this test now
+    // proves the stronger property: an access violation that belongs to someone
+    // else reaches a later handler untouched, because mem:: never registers one.
     uint8_t tmp[8] = {};
-    (void)acz::mem::ReadBytes(0, tmp, sizeof(tmp));
+    (void)acz::mem::ReadBytes(0, tmp, sizeof(tmp));  // no-op warm-up, kept for symmetry
 
     PVOID handler = AddVectoredExceptionHandler(0 /* last */, &TestLastChanceHandler);
     Check(handler != nullptr, "test last-chance handler installed");
