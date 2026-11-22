@@ -1,0 +1,88 @@
+# License
+
+ACZPropNav — proportional-navigation missile guidance for
+**ACE COMBAT ZERO: THE BELKAN WAR** (Steam, Windows x64).
+
+This file covers everything in this repository that was written for this
+project. It does **not** cover the game, and it does **not** relicense one
+vendored third-party script; both are called out below.
+
+---
+
+## 1. Copyright
+
+    Copyright (c) 2025-2026 silicer
+
+(`silicer` is the project's author handle; substitute the legal name here if it
+ever differs, and keep the years accurate.)
+
+## 2. No game data or game assets are distributed
+
+This repository contains **no** part of ACE COMBAT ZERO: THE BELKAN WAR and no
+derived asset: no executable, no `*.arc` archive, no `*.wpb`/`*.wpt` data file,
+no texture, model, audio or text table, and no extracted dump of any of those.
+
+What the documentation *does* contain is interoperability information obtained
+by observation — RVAs/offsets, structure layouts, and small numeric values read
+out of the shipping game's own data (e.g. "the vanilla `mis.wpb` record has
+`scope = 1600`"). Those are facts needed to write a compatible mod; they are
+not a redistribution of the game's assets. The mod is an unmodified install
+add-on: it reads `ACZPropNav.ini` and patches its own process at runtime. It
+never modifies `acz.exe`, `*.arc` files or save data.
+
+ACE COMBAT ZERO: THE BELKAN WAR and all related marks are trademarks of their
+respective owners (Bandai Namco Entertainment). This project is unofficial and
+is not affiliated with, endorsed by, or supported by Bandai Namco.
+
+## 3. NOTICE — third-party and original components
+
+* `tools/arc/upstream/aczarc.py` — **vendored community script, not MIT.**
+  It is the archive unpack/repack script published with the "ACZ Enhanced
+  Gunplay" mod on moddb (`ACZ_Enhanced_Gunplay_Mod_A6.zip`,
+  MD5 `bd226c83426b8e1c856737aae3a5d25b`,
+  <https://www.moddb.com/games/ace-combat-zero-the-belkan-war/addons/acz-enhanced-gunplay-mod>).
+  It is kept unmodified, for reference and as a fallback unpacker only; it is
+  never imported by the mod. Its author did not ship a license statement, so
+  **it remains the property of its author, all rights reserved**, and the MIT
+  grant below does not apply to it. It is not part of any release archive
+  produced by `tools/package_release.sh`. If you redistribute this repository
+  and want to be strict, drop that one file (nothing in the build needs it) or
+  ask the upstream author for terms.
+* `tools/arc/arc_tool.py`, `tools/arc/wpb_dump.py`, `tools/arc/dl.py` — original
+  to this project (MIT, below). `arc_tool.py` was written from the decoded
+  format; it is read-only and never writes to the game directory.
+* `tools/re/*` — original to this project (MIT, below): the RTTI/vtable/xref
+  scripts used to produce `docs/RE.md`, `docs/RTTI.md` and friends.
+* Everything else (`src/`, `loader/`, `build.sh`, `Makefile`, `ACZPropNav.ini`,
+  the `.cmd`/`.ps1` installers, `tools/pnsim`, `tools/*test`, `tools/gen_*`)
+  — original to this project (MIT, below).
+* No third-party code is linked into the shipped DLLs. The runtime dependencies
+  are the Windows system libraries only (`kernel32`, `user32`, `psapi`,
+  `advapi32`), linked statically otherwise; the toolchain is mingw-w64.
+
+## 4. MIT License
+
+Applies to the original code of this project (everything except
+`tools/arc/upstream/aczarc.py`, per §3 above).
+
+    MIT License
+
+    Copyright (c) 2025-2026 silicer
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.

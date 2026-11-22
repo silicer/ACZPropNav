@@ -1,0 +1,37 @@
+; ACZPropNav - export table of the VERSION.dll proxy.
+;
+; Mirrors the real C:/Windows/System32/version.dll export table exactly,
+; 17 entries, names AND ordinals. acz.exe imports the named exports
+; GetFileVersionInfoW at ordinal 9, VerQueryValueW at 17 and
+; GetFileVersionInfoSizeW at 8. Everything else is exported only so that an
+; unrelated module which happens to load version.dll by name still gets a
+; complete, working DLL.
+;
+; Verified with:
+;   llvm-objdump -p C:/Windows/System32/version.dll
+;
+; Entries 14 and 15 are forwarders to KERNEL32 in the real DLL. Our thunks
+; forward to the real DLL, whose forwarder resolves to the same KERNEL32 code.
+;
+; NOTE: no "LIBRARY VERSION" statement on purpose -- lld's .def parser treats
+; the token VERSION as a keyword and fails with "identifier expected, but got
+; EXPORTS". Without it the image is named after the output file, which is
+; VERSION.dll anyway.
+EXPORTS
+    GetFileVersionInfoA                     @1
+    GetFileVersionInfoByHandle=VerFwd_GetFileVersionInfoByHandle   @2
+    GetFileVersionInfoExA=VerFwd_GetFileVersionInfoExA             @3
+    GetFileVersionInfoExW=VerFwd_GetFileVersionInfoExW             @4
+    GetFileVersionInfoSizeA                 @5
+    GetFileVersionInfoSizeExA=VerFwd_GetFileVersionInfoSizeExA     @6
+    GetFileVersionInfoSizeExW=VerFwd_GetFileVersionInfoSizeExW     @7
+    GetFileVersionInfoSizeW                 @8
+    GetFileVersionInfoW                     @9
+    VerFindFileA=VerFwd_VerFindFileA                               @10
+    VerFindFileW=VerFwd_VerFindFileW                               @11
+    VerInstallFileA=VerFwd_VerInstallFileA                         @12
+    VerInstallFileW=VerFwd_VerInstallFileW                         @13
+    VerLanguageNameA=VerFwd_VerLanguageNameA                       @14
+    VerLanguageNameW=VerFwd_VerLanguageNameW                       @15
+    VerQueryValueA                          @16
+    VerQueryValueW                          @17

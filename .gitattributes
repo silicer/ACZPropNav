@@ -1,0 +1,46 @@
+# ===========================================================================
+# ACZPropNav — line-ending / encoding policy.
+#
+# The project ships NO installer scripts: a release is a plain zip copied into
+# the game folder (see docs/RELEASING.md). So there is no GBK batch-file
+# problem to guard against any more - that policy was retired along with the
+# .cmd/.ps1 scripts it existed for.
+#
+# The one file whose bytes matter is ACZPropNav.ini: it is UTF-8 **with a BOM**
+# and carries the Chinese comments users read. Its parser is CRLF-tolerant
+# (src/core/config.cpp treats '\r' and '\n' as line ends), so normalizing the
+# line endings is safe, but the BOM must survive.
+# ===========================================================================
+
+# Default: let git decide for unknown text files (normalize on commit).
+* text=auto
+
+# ---- config: UTF-8, user-editable on Windows ------------------------------
+# The mod's INI parser is CRLF-tolerant (src/core/config.cpp:68 treats '\r'
+# and '\n' as line ends), so text normalization is safe; keep it `text` with
+# no forced eol so a Windows checkout gets native CRLF while the repo stores
+# LF. eol is NOT forced to lf: Notepad-friendliness wins here.
+*.ini text
+
+# ---- normal source / docs / scripts: LF everywhere -----------------------
+*.md    text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+*.cpp   text eol=lf
+*.h     text eol=lf
+*.def   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.txt   text eol=lf
+Makefile text eol=lf
+LICENSE  text eol=lf
+
+# ---- binaries (none are tracked; listed so a stray file is never mangled) -
+*.dll  binary
+*.exe  binary
+*.zip  binary
+*.arc  binary
+*.wpb  binary
+*.wpt  binary
+*.ppb  binary

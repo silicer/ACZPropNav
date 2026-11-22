@@ -1,0 +1,15 @@
+; ACZPropNav - export table of the ACZPropNav.dll mod.
+;
+; Deliberately minimal: exactly ONE exported symbol. The proxy loader calls
+; AczCoreRun() explicitly after LoadLibraryW, so the mod needs no DllMain work
+; and no COM/ATL plumbing.
+;
+; Contract with src/core/mod.cpp (owned by the Lead):
+;     extern "C" void AczCoreRun(void* hSelfModule);
+; hSelfModule is the HMODULE of ACZPropNav.dll (useful for GetModuleFileName,
+; config/log paths and GetModuleHandleEx pinning). Declaring it without the
+; parameter, i.e. `extern "C" void AczCoreRun(void);`, is also ABI-compatible on
+; x64 - the extra argument arrives in rcx and is simply ignored.
+LIBRARY ACZPropNav
+EXPORTS
+    AczCoreRun

@@ -1,0 +1,86 @@
+# ===========================================================================
+# ACZPropNav — what must never end up in the public repository.
+#
+# Rule of thumb: the repo is SOURCE + DOCS only. Everything the build produces
+# and everything the reverse-engineering work copied out of the game stays
+# local. See docs/RELEASING.md for the shipping checklist.
+#
+# Explicitly NOT ignored (they look like build output but are source):
+#   loader/*.def        Windows export tables, hand-written source
+#   ACZPropNav.ini      the shipped default config (user-editable)
+#
+# Note: this project ships NO installer scripts. The release is a plain zip whose
+# contents are copied into the game folder; see docs/RELEASING.md.
+# ===========================================================================
+
+# ---- build output ---------------------------------------------------------
+# /build/ also holds *.o, *.d, the test .exe files, obj/ and stray smoke-test
+# logs; nothing in it is source.
+/build/
+/dist/
+/release/
+/out/
+
+# ---- local reverse-engineering workspace (NEVER publish) ------------------
+# work/ is ~86 MB / 805 files: copies of acz.exe (work/acz_copy.exe,
+# work/acz_copy.exe.unpacked.exe), extracted copyrighted game assets
+# (work/a, work/a5arc, work/a6, ...), third-party community-mod downloads
+# (work/egp, work/dl) and the Steamless unpacker ZIP. Accepting a single file
+# from here into git would be a copyright violation and, for the zips/DLLs, a
+# code-distribution problem. It is scratch space, not part of the project.
+/work/
+
+# ---- compiled objects / link leftovers ------------------------------------
+*.o
+*.obj
+*.d
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.map
+*.so
+*.dylib
+*.exe
+*.dll
+# ...but keep the hand-written export tables next to the loader sources.
+!*.def
+
+# ---- logs and crash dumps -------------------------------------------------
+*.log
+*.key.log
+*.dmp
+*.core
+
+# ---- backups / merge leftovers --------------------------------------------
+*.bak
+*.bak[0-9]
+*.bak.*
+*.orig
+*.rej
+*.old
+*~
+
+# ---- python (tools/ scripts, work/ scratch helpers) -----------------------
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ---- editor / IDE ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.#*
+#*#
+*.code-workspace
+
+# ---- OS junk --------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+*.lnk

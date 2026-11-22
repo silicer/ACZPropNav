@@ -1,0 +1,30 @@
+; ACZPropNav - export table of the XINPUT1_4.dll proxy.
+;
+; Mirrors the real C:\Windows\System32\XInput1_4.dll exactly (names AND
+; ordinals), so anything that was linked against the genuine DLL -- or that
+; imports it by ordinal, which is what acz.exe does for #2/#3 -- is satisfied.
+;
+; Verified with:
+;   llvm-objdump -p C:/Windows/System32/XInput1_4.dll | sed -n '/Export Table/,$p'
+;   1 DllMain, 2 XInputGetState, 3 XInputSetState, 4 XInputGetCapabilities,
+;   5 XInputEnable, 7 XInputGetBatteryInformation, 8 XInputGetKeystroke,
+;   10 XInputGetAudioDeviceIds, plus ordinal-only 100-104, 108, 109.
+; Ordinals 6 and 9 do not exist in the real DLL, so they are intentionally
+; absent here as well.
+LIBRARY XINPUT1_4
+EXPORTS
+    DllMain                         @1
+    XInputGetState                  @2
+    XInputSetState                  @3
+    XInputGetCapabilities           @4
+    XInputEnable                    @5
+    XInputGetBatteryInformation     @7
+    XInputGetKeystroke              @8
+    XInputGetAudioDeviceIds         @10
+    Fwd_100                         @100 NONAME
+    Fwd_101                         @101 NONAME
+    Fwd_102                         @102 NONAME
+    Fwd_103                         @103 NONAME
+    Fwd_104                         @104 NONAME
+    Fwd_108                         @108 NONAME
+    Fwd_109                         @109 NONAME

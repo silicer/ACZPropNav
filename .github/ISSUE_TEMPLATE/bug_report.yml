@@ -1,0 +1,83 @@
+name: Bug report
+description: Crash, mod not loading, or wrong missile behaviour
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please read `README.md` §安装 and `docs/CALIBRATION.md`
+        ("the three logs") — most "the mod does nothing" reports are a missing
+        `XINPUT1_4.dll` beside `acz.exe` or a log line that says exactly why the
+        parameter patch was skipped.
+
+        **Do not upload game files.** No `acz.exe`, no `*.arc`, no `*.wpb` /
+        `*.wpt`, no game directory listing beyond what is asked below. This
+        project distributes no game data and issues must not either.
+  - type: input
+    id: mod_version
+    attributes:
+      label: Mod version
+      description: The `ACZPropNav <version>` banner line from the first line of `ACZero\ACZPropNav.log`.
+      placeholder: "e.g. ACZPropNav 1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: game_version
+    attributes:
+      label: Game build / storefront
+      description: Game build id from Steam (ACZ:TBW, AppID 5370600), plus the approximate date you last updated it. Steam updates can move the RVAs the mod relies on.
+      placeholder: "e.g. Steam build 12345678, updated 2026-10-01"
+    validations:
+      required: true
+  - type: dropdown
+    id: loader
+    attributes:
+      label: How is the DLL being loaded?
+      options:
+        - XINPUT1_4.dll proxy (the default, unzipped into ACZero\)
+        - VERSION.dll proxy (copied in manually)
+        - community version.dll modloader (ACZero\mods\)
+        - not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What happens?
+      options:
+        - Game exits to desktop before the main menu (DLL load issue)
+        - Game starts but behaviour is vanilla / mod has no effect
+        - Game crashes mid-flight
+        - Missiles behave differently than the INI describes
+        - FPS stutter or a new in-game warning
+        - something else (described below)
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What did you expect, and what happened instead?
+      description: Aircraft, missile type, mission, and the relevant `ACZPropNav.ini` section (`[player]` / `[enemy]`).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Paste (or attach) `ACZero\ACZPropNav.log` and `ACZero\ACZPropNav.key.log`.
+        Both are size-capped and contain no game data. If the mod never even logged,
+        say so — that is itself the diagnosis.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have not attached any game executable, archive, asset or save file.
+          required: true
+        - label: This is not a request for game files or for piracy help.
+          required: true
