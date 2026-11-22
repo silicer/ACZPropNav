@@ -373,3 +373,28 @@ around every dereference" —— 这**是假的**：该工具链根本不生成 
 **教训**：一个在实机三次都没崩的保护层，未必是好的 —— 它可能只是从未被走到。
 CI 的价值就在这里：Windows PE 测试是唯一能跑 `memtest`/`initest`/`hooktest` 的地方，
 而 Linux 本机只能跑 `pnsim`。
+
+### 16.7 CI 从红到绿：四个真实问题的修法
+
+CI 第一次真正跑起 Windows PE 测试，连续暴露了四个问题。按发现顺序：
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `build.sh: unzip: command not found`（line 176） | `ci.yml` 的 MSYS2 包列表装了 `zip`，漏了 `unzip`（两者是**独立包**；`release.yml` 本来就有） | 补 `unzip`；并在 `package_release.sh` 开头 preflight 检查 `zip`/`unzip` 并提示该装哪个包 —— 原来是在**归档已经生成之后**才炸，读起来像打包 bug 而不是缺工具 |
+| 2 | `initest` 2 条失败：`unknown [runtime] key 'TerminalZone'` | `ApplyRuntime()` 有分支，但 `IsKnownRuntimeKey()` 白名单没加 —— 值被**静默丢弃**，设了也不生效且无提示 | 白名单补 `terminalzone` / `terminalhandback` / `handback` |
+| 3 | `initest` 1 条失败：`runtime: no warnings` | 上一条修好后，解析器给合法选项 `TerminalZone` 打了 `Warn()`，被"无警告"断言判为配置错误 | 删掉那条 `Warn()` —— 合法选项不该和真正的配置错误走同一通道；值已由 MSL_PN 启动行回显 |
+| 4 | `memtest` **段错误，零输出** | 完整根因见 §16.6（`longjmp` 出 VEH 处理器） | 改内核中介拷贝为主路径 |
+| 5 | `memtest` 91 项里 1 条：`page-crossing write landed correct bytes` | **我的测试写错了**：12 字节写从 `page-8` 起，float0 在 `[page-8,page-4)`、float1 在 `[page-4,page)`、float2 在 `[page,page+4)`；我在 `page-4` 读却断言 `3.5f`（实际是 `2.5f`） | 改成两半都验（顺带成为更强的断言：证明写确实跨进了第二页） |
+| 6 | `smoke`：`log contains the version banner` | 硬编码 `"ACZPropNav 1.0.0"`，1.0.1 升版后失效；**一直被 memtest 段错误掩盖**（`build.sh` 在第一个失败二进制处停止） | 改为匹配 **banner 形状** `ACZPropNav <数字>.`，升版不再破坏它 |
+
+**排障方法论（值得复用）**：`memtest` 崩得**连 banner 都没有**，因为 stdout 缓冲在进程死时丢光。
+两步解决：
+1. `std::setvbuf(stdout, nullptr, _IONBF, 0)` 放 `main` 第一句 —— 崩溃前的输出不再丢；
+2. 加 `MEMTEST_TRACE=1` 逐调用打印（`Trace("ReadBytes(1, buf, 4)")`），
+   `build.sh` 对 memtest 默认开启。
+
+一次 CI 运行就把崩溃点收敛到**单个函数调用**。猜是没用的，让程序自己说出来。
+
+**另一个教训**：`build.sh` 在第一个失败的测试二进制处停止，所以 `smoke` 的陈旧断言
+被 `memtest` 的崩溃掩埋了好几轮。修好前一个 bug 后，下一个才浮出来 ——
+看到"只差一个"时，别假设它是最后一个。
