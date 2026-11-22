@@ -162,6 +162,13 @@ if [ -n "${SOURCE_DATE_EPOCH:-}" ] && command -v touch >/dev/null 2>&1; then
     find "$DEST" -exec touch -d "@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
 fi
 
+# The verification below reads the finished zip back with `unzip`. Check up front:
+# a missing unzip used to surface as "line 176: unzip: command not found" *after*
+# the archive had been created, which reads like a packaging bug rather than a
+# missing tool (hit on the Windows CI runner, whose MSYS2 env has zip but not unzip).
+command -v zip >/dev/null 2>&1 || die "zip is required (Debian/Ubuntu: apt install zip; MSYS2: pacman -S zip)"
+command -v unzip >/dev/null 2>&1 || die "unzip is required (Debian/Ubuntu: apt install unzip; MSYS2: pacman -S unzip)"
+
 # ---- 3. archive -------------------------------------------------------------
 ZIP=$OUT_DIR/ACZPropNav-$VERSION-win64.zip
 section "creating archive"

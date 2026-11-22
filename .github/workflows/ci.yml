@@ -53,6 +53,7 @@ jobs:
             mingw-w64-x86_64-gcc
             make
             zip
+            unzip
             git
 
       # Inside MSYS2 the compiler is plain `g++` (it already targets
