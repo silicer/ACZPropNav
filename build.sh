@@ -193,6 +193,35 @@ do_native_tests() {
     return $rc
 }
 
+# The release zip must extract DIRECTLY into ACZero\ - no ACZPropNav/ wrapper. The
+# README says "unzip into ACZero\", so a wrapper lands the proxy at
+# ACZero\ACZPropNav\XINPUT1_4.dll and the mod silently never loads. v1.0.0 and
+# v1.0.1 both shipped with the wrapper; this check keeps it from coming back.
+do_package_check() {
+    local rc=0 out zip members
+    command -v zip >/dev/null 2>&1 || { yellow "skip package check (no zip)"; return 0; }
+    command -v unzip >/dev/null 2>&1 || { yellow "skip package check (no unzip)"; return 0; }
+    out=$(mktemp -d -t aczpropkgcheck.XXXXXX) || return 1
+    step "test: release packaging is flat"
+    if ! ./tools/package_release.sh --out-dir "$out" >/dev/null 2>&1; then
+        red "package_release.sh failed"; rm -rf "$out"; return 1
+    fi
+    zip=$(ls "$out"/*.zip 2>/dev/null | head -1)
+    if [ -z "$zip" ]; then
+        red "no zip produced"; rm -rf "$out"; return 1
+    fi
+    if unzip -Z1 "$zip" | grep -q '/'; then
+        red "archive contains a directory path - it must be flat"
+        unzip -Z1 "$zip" | grep '/' | sed 's/^/    /'
+        rc=1
+    else
+        members=$(unzip -Z1 "$zip" | wc -l | tr -d ' ')
+        green "flat archive, $members members"
+    fi
+    rm -rf "$out"
+    return $rc
+}
+
 do_test() {
     local rc=0
     if can_run_pe; then
@@ -224,6 +253,8 @@ do_test() {
         red "Run ./build.sh test on Windows (or install wine) for the full suite."
         do_native_tests || rc=1
     fi
+    # Packaging is part of "can we ship this", so it runs in the gate too.
+    do_package_check || rc=1
     if [ $rc -eq 0 ]; then
         green "ALL RUNNABLE TESTS PASSED"
     else

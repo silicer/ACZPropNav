@@ -143,7 +143,13 @@ fi
 section "staging"
 STAGE=$(mktemp -d -t aczproprelease.XXXXXX)
 trap '[ "$KEEP" -eq 1 ] || rm -rf "$STAGE"' EXIT
-DEST=$STAGE/ACZPropNav
+# FLAT layout: the members must land directly in ACZero\, NOT inside an
+# ACZPropNav/ wrapper. The README tells the user to "extract into ACZero\", so a
+# wrapper directory produces ACZero\ACZPropNav\ACZPropNav.dll and the proxy DLL is
+# never found - the mod silently does not load. That is what shipped in v1.0.0 and
+# v1.0.1 (both zips carry a top-level ACZPropNav/), so this is a fix, not a taste
+# choice. Staging dir itself is the zip root; copy_in fills it directly.
+DEST=$STAGE
 mkdir -p "$DEST"
 
 copy_in() { # copy_in <repo-relative-name>
@@ -173,19 +179,27 @@ command -v unzip >/dev/null 2>&1 || die "unzip is required (Debian/Ubuntu: apt i
 ZIP=$OUT_DIR/ACZPropNav-$VERSION-win64.zip
 section "creating archive"
 rm -f "$ZIP"
-( cd "$STAGE" && zip -r -q -X "$ZIP" ACZPropNav )
+# `-j` is deliberately NOT used (paths are already flat); archive the members by
+# name so the zip has no directory entries at all, plus a defensive check below.
+( cd "$STAGE" && zip -q -X "$ZIP" "${PAYLOAD_FILES[@]}" )
 printf '  %s\n' "$ZIP"
 
 # ---- 4. verify the FINISHED archive -----------------------------------------
 # Re-read the zip and diff its members against the allowlist: this is what makes
 # a leak of work/ or build/obj/ impossible even if the staging logic is wrong.
 section "verifying archive"
-ACTUAL=$(unzip -Z1 "$ZIP" | sed 's#^ACZPropNav/##' | grep -v '/$' | grep -v '^$' | sort)
+ACTUAL=$(unzip -Z1 "$ZIP" | grep -v '/$' | grep -v '^$' | sort)
 EXPECTED=$(printf '%s\n' "${PAYLOAD_FILES[@]}" | grep -v '^$' | sort)
 if [ "$ACTUAL" != "$EXPECTED" ]; then
     printf 'unexpected members in the archive:\n' >&2
     diff <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$ACTUAL") >&2 || true
     die "archive content does not match the allowlist"
+fi
+# The zip must be FLAT: a wrapper directory would break the documented install.
+if unzip -Z1 "$ZIP" | grep -q '/'; then
+    printf 'archive contains a directory path (it must be flat):\n' >&2
+    unzip -Z1 "$ZIP" | grep '/' >&2
+    die "the archive must extract directly into ACZero\\ (no wrapper folder)"
 fi
 for forbidden in '/work/' 'build/obj' '.pdb' '.lib' 'acz.exe' 'acz_copy'; do
     if unzip -Z1 "$ZIP" | grep -q -- "$forbidden"; then

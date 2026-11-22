@@ -9,7 +9,12 @@ download has no DLLs. Users get binaries from a Release asset built by this proc
 ## 1. What a release is
 
 A release is **one zip attached to a git tag**, and its contents **extract straight
-into the game folder** — no installer, no subdirectory:
+into the game folder** — no installer, no wrapper subdirectory. This is enforced:
+`tools/package_release.sh` builds the zip from a flat staging dir and then refuses
+to finish if any member path contains `/`. (v1.0.0 and v1.0.1 both shipped with an
+`ACZPropNav/` wrapper, which put the proxy at `ACZero\ACZPropNav\XINPUT1_4.dll`
+where the game never loads it — the documented install silently did nothing.
+`./build.sh test` now runs the same flat-layout check so it cannot recur.)
 
 ```
 <Steam>\steamapps\common\ACE COMBAT ZERO THE BELKAN WAR (Steam Version)\
