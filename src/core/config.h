@@ -117,10 +117,10 @@ struct RuntimeSection {
     //       no engagement outcome, so it is now opt-in for A/B comparison only.
     float terminalZone = 0.f;
     // Diagnostic: observe the EFF_MIS_POSDIR ring writers (the tail-smoke emitters)
-    // to learn which code advances a plain-MSL missile each frame (docs/MSL_TARGET.md).
+    // to learn which code advances a plain-MSL missile each frame (docs/MSL_PN.md).
     // Read-only: the detours run the original function first, then log.
     int ringSurvey = 0;   // 0 = off, 1 = hook exe+0x3B300 / 0x3B370 and log callers
-    // Run B: hardware read-watch probe (docs/PROBE_RUN_B.md). 0 = off.
+    // Run B: hardware read-watch probe (docs/ARCHITECTURE.md). 0 = off.
     // Installs x86-64 data breakpoints on the live .wpb record to find which code
     // reads `lead` / `startAng` while a plain MSL flies. Read-only.
     int hwWatch = 0;          // 1 = enabled

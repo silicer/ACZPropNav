@@ -159,75 +159,60 @@ LogLevel = 2        ; 2 = 详细：每 2 秒一行统计 + 每条修正明细
 
 ---
 
-## 5. 可选：真 PN 接管（`MaxRotationAngle` 唯一生效的路径）
+## 5. 制导钩子：已经预校准，只有游戏更新后才需要动
 
-ACZ 的数据记录里没有"转向速率"字段（它硬编码在引擎里），所以想用
-`MaxRotationAngle` 限速、并让制导律完全由本模组接管，需要一次钩子校准：
+**正常情况下这一节不用做任何事。** 两条钩子目标（普通 MSL 的 `exe+0x13ECA0`、
+特武的积分器 `exe+0x90510`）是**硬编码 RVA + 运行时逐字节校验**的：模组启动后
+校验目标函数的入口字节，对不上就**放弃安装、只写日志**，导弹保持原版行为，不会乱打补丁。
+机制、入口字节与槽布局见 [HANDOFF.md](HANDOFF.md) §3。
 
-**已有可直接使用的逆向结果（详见 [RE.md](RE.md) §3.7 / §10，已验证于 acz.exe
-4,046,008 B / SHA-256 `3802B0DC…`）：**
+一次 Steam 更新把 `.text` 挪走之后，你会看到：
 
-| 目标 | RVA | 说明 |
-| --- | --- | --- |
-| 导弹攻击调度器（推荐钩这里） | `exe+0x09DBB0` | 参数仅 `this`（RCX），所以 `HookArgIndex=1` |
-| 单枚导弹更新函数（需保留 RDX/R8/XMM3） | `exe+0x091DC0` | ABI `(this, int slotIndex, MissileSlot*, float const 2.0f)`，**不能用本模组现在的两参 detour** |
-| 导弹实例数组 | `this+0x80`，步长 `0x68`，16 槽 | 存活掩码 `*(u32*)(this+0x5C)`，第 i 枚 = `this+0x80+i*0x68` |
+```
+PN: 积分器字节校验失败 / integrator bytes mismatch ...           ← 特武路径
+MSLPN: hook not installed after 60 s (bytes never matched ...)   ← 普通 MSL 路径
+```
 
-`0x09DBB0` 的字节签名（唯一命中）：
+处置顺序：
+
+1. **先确认是不是只是没等到解密**：钩子是延迟安装的（每 200 ms 重试、最多 60 s），
+   游戏刚启动时的一次失败是正常的，日志里 `MSLPN: waiting for the SteamStub-decrypted .text` 就是这条。
+2. 真的失配 ⇒ 用 `tools/re/xref.py` 在解包副本上重新定位那两个函数，更新
+   `src/pn/msl_pn.h` / `src/core/patcher.cpp` 里的 RVA 与期望的入口字节。
+   `hooktest` 里有离线断言钉死这些字节，改完跑一次就知道对不对。
+3. 特殊武器的积分器还有一条**签名兜底**：RVA 校验失败时用 12 字节唯一模式
+   （`48 8B C4 C5 FA 11 58 20 C5 FA 11 50`）在可执行段里搜；命中恰好 1 次就采用，
+   命中多次就拒绝安装（宁可不动）。
+
+需要手工指定目标时（调试用）仍有 `[runtime] HookRva` / `HookSignature` /
+`HookArgIndex`，走的是另一条"通用实体改写"路径 —— 那条路径**不认识**武器控制器的
+槽结构，只会拒绝而不会乱写，所以它不是日常选项。上面那个 RVA 校验失败时的兜底
+签名是：
 
 ```
 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 40 C5 F8 29 74 24 30 C5 FA 10 35 ?? ?? ?? ?? 48 8B E9 48 8D B1 80 00 00 00
 ```
 
-所以校准顺序是：
-
-```ini
-[runtime]
-HookSignature = 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 40 C5 F8 29 74 24 30 C5 FA 10 35 ?? ?? ?? ?? 48 8B E9 48 8D B1 80 00 00 00
-HookArgIndex  = 1
-DryRun        = 1
-Probe         = 1
-```
-
-重启后看 `ACZPropNav.key.log`：应出现 `制导钩子已安装`，以及每个 tick 的
-`实体布局未识别 / entity layout not recognised: ...`（**这是预期**：v1.0 的实体相关器
-还不认识 `WeaponCtrl` 的槽结构，它只会拒绝而不会乱写）。要让 PN 真正生效，下一步需要
-在 `patcher.cpp` 里为 `WeaponCtrl` 增加一个"数组遍历"适配器：
-
-```text
-每 tick（或每次原函数返回后）：
-  mask = *(u32*)(this + 0x5C)
-  for i in 0..15:
-      if !(mask & (1 << i)) continue
-      slot = this + 0x80 + i * 0x68
-      if *(u8*)(slot + 0x50) == 0: continue     // 未激活
-      // 读 slot 内的位置/朝向（RE.md §3.7.2 给出 disasm 与偏移），
-      // 用 pn.h 计算 desiredDir，受 MaxRotationAngle / MaxHomingAngle 约束后写回
-```
-
-这就是"一次会话"的工作量：`pn.h` 的数学、钩子引擎、日志与配置都已经就绪，
-只差把 `WeaponCtrl` 的槽字段映射补上（用 `docs/RE.md §3.7.2` 的 x64dbg 检查法确认
-`slot+0x00` 位置向量、`slot+0x10/0x14` 朝向标量、`slot+0x50` 存活字节）。
-
-> 如果你不想现在做这一步：v1.0 的"数据 + 前置量"路径已经能改变普通 MSL / 僚机弹的
-> 追踪手感（`HomingForesightAmount` → `lead`），这是可用的主体功能。
+（`exe+0x09DBB0`，特武每帧派发器，参数只有 `this` ⇒ `HookArgIndex = 1`；
+槽数组 `this+0x80`、步长 `0x68`、16 槽，存活掩码 `*(u32*)(this+0x5C)`。
+注意 **LASM 的步长是 `0x78`**。）
 
 ---
 
-## 6. 调手感：`LeadScale` / `LeadMode`
-
-`HomingForesightAmount` 是 0…1 的归一化强度，引擎 `lead` 是"帧"（60 Hz）。默认：
+## 6. `LeadScale` / `LeadMode` 不属于手感旋钮
 
 ```ini
-LeadMode  = add      ; lead = 原版 + amount * LeadScale
-LeadScale = 260      ; amount = 1.0 时额外 260 帧 ≈ 4.3 s 前置
+LeadMode  = add      ; add | blend | absolute
+LeadScale = 260      ; add 模式：lead = 原版 + amount * 260 帧
 ```
 
-* 原版 MSL 的 `lead = 40`（≈0.67 s）⇒ `amount=0` 即完全原版；
-* `amount=0.7`（出厂默认）⇒ 40 + 182 = 222 帧 ≈ 3.7 s 前置，明显"提前量打"；
-* 觉得太强就降 `LeadScale`（120 已经很凶），想更接近"必中"就调到 400+；
-* `LeadMode=blend` 适合想保留原版差异（型号越强的原版 lead 越高，混合后仍保留差异）；
-  `absolute` 则所有型号手感一致，不推荐日常使用。
+这两个键**只服务于旧的静态参数路径**（改写游戏内存里的 `.wpb` 记录），而那条路径
+在当前正式版上默认不生效（记录被重新序列化，见 [HANDOFF.md](HANDOFF.md) §3.5）。
+所以：**调手感请用 `HomingForesightAmount` + `PnGain`，不要动这两个键。**
+
+另外注意 ACZ 的 `lead` 字段语义是**每帧最大转角（度/秒）**，不是"前置量" ——
+把 `LeadScale` 调大只会让导弹转得更急，不会产生提前量。真正的提前量来自 PN 数学。
+
 
 ---
 

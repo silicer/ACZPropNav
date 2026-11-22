@@ -1,6 +1,6 @@
 # ACZPropNav — Proportional-Navigation missiles for ACE COMBAT ZERO: THE BELKAN WAR
 
-[中文说明](README.md) · [Calibration guide](docs/CALIBRATION.md) · [Vanilla values](docs/VANILLA.md) · [Architecture](docs/ARCHITECTURE.md)
+[中文说明](README.md) · [Configuration reference](docs/CONFIG.md) · [Troubleshooting](docs/CALIBRATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Technical detail](docs/MSL_PN.md) · [Doc index](docs/INDEX.md)
 
 Replaces the vanilla tail-chase missile homing of the Steam port of *Ace Combat Zero*
 with real **proportional navigation (PN)**, configured through an INI that is a strict
@@ -97,47 +97,31 @@ Before opening an issue (otherwise it usually cannot be diagnosed):
 
 ## Configure
 
+Edit `ACZero\ACZPropNav.ini`. **Only change the numbers; a blank value keeps vanilla.**
+
 ```ini
 [player]
 msl = {
-    HomingForesightAmount = 0.7     ; 0 = vanilla tail chase, 1.0 = full lead
-    LockonRange           =
-    MaxRotationAngle      =
-    MaxHomingAngle        =
-    LifeTime              =
+    HomingForesightAmount = 0.7     ; * main knob: 0 = pure pursuit, 1 = full PN
+    MaxRotationAngle      =         ; turn rate (deg/s); blank = 180
+    MaxHomingAngle        =         ; seeker cone (deg); blank = the game's own value
 }
-qaam = { HomingForesightAmount = 1.0 }
-2aam = 0.9                          ; legacy shorthand
 ```
 
-Property → ACZ data field mapping (see [docs/VANILLA.md](docs/VANILLA.md)):
+The three you will actually touch:
 
-| Property | Unit | ACZ field |
+| Property | Effect | Guidance |
 | --- | --- | --- |
-| `HomingForesightAmount` | 0 – 1 | `lead` (frames of lead at 60 Hz) |
-| `MaxHomingAngle` | deg | `startAng` (seeker start angle) |
-| `MaxRotationAngle` | deg/s | *not in the data records* — used only as the rate limit of the PN override |
-| `LifeTime` | s | `range` / guidance time-out |
-| `LockonRange` | m | `scope` |
+| `HomingForesightAmount` | guidance-law blend | start at 0.7; toward 1 for stronger, lower for closer to vanilla |
+| `MaxRotationAngle` | turn rate (deg/s) | blank = 180; above 360 is effectively instant |
+| `MaxHomingAngle` | seeker half-angle (deg) | raising this is the single biggest buff — `360` makes missiles almost impossible to shake |
 
-INIs written for AC8PropNav keep working unchanged; only the numbers need retuning.
+`[enemy]` covers missiles fired by anyone but you (enemies **and** wingmen). To keep
+the AI vanilla, delete the whole `[enemy]` section.
 
-Optional extension sections:
-
-```ini
-[runtime]
-LogLevel = 2
-DryRun   = 0
-Probe    = 1        ; deep one-shot dump into ACZPropNav.key.log
-LeadScale= 260      ; frames of extra lead added at HomingForesightAmount = 1
-LeadMode = add      ; add | blend | absolute
-HookRva  = 0x0      ; calibrated address of the missile update
-HookSignature =     ; or an AOB pattern
-HookArgIndex = 2    ; 1 = this only, 2 = this + float dt
-
-[vanilla]
-msl = { lead = 40  scope = 1600  range = 3000  speed = 1000 }
-```
+Full property reference, model-key matching rules and the `[runtime]` extension keys
+(`LogLevel`, `PnGain`, `TerminalZone`, …) are in **[docs/CONFIG.md](docs/CONFIG.md)**;
+the INI itself carries bilingual comments on every key.
 
 ## Why runtime discovery
 

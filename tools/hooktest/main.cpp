@@ -648,7 +648,7 @@ bool Test6() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Real prologues of the "Run A" probe hook targets (docs/PROBE_RUN_A.md)
+// 7. Real prologues of the "Run A" probe hook targets (docs/ARCHITECTURE.md)
 // ---------------------------------------------------------------------------
 // The probe hooks the pool allocator at exe+0x201460 and the node-pop function.
 // The documented pop entry exe+0x1B2C0 is NOT hookable:

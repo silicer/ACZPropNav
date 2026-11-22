@@ -208,13 +208,13 @@ bool Patcher::Start(const Config& cfg, const std::wstring& gameDir) {
              static_cast<unsigned long long>(mi.size));
     L().Info("  path: %s", WideToUtf8(mi.path).c_str());
 
-    // "Run A" read-only live probe (docs/PROBE_RUN_A.md).  It owns its own Tick
+    // "Run A" read-only live probe (docs/ARCHITECTURE.md).  It owns its own Tick
     // from here on and does the two observation hooks + sampling itself.
     if (cfg_.runtime.probe) {
         L().Info("Probe=1：启动 Run A 只读探针 / starting the Run A read-only live probe");
         probe_.Start(mi.base);
     }
-    // "Run B" hardware read-watch probe (docs/PROBE_RUN_B.md).  Not meant to run
+    // "Run B" hardware read-watch probe (docs/ARCHITECTURE.md).  Not meant to run
     // together with Run A (both want the allocator hook), so Run A takes precedence.
     if (cfg_.runtime.hwWatch) {
         L().Info("HwWatch=1：启动 Run B 硬件观察探针（Dr0..Dr3 只读数据断点）/ starting the Run B "
@@ -228,7 +228,7 @@ bool Patcher::Start(const Config& cfg, const std::wstring& gameDir) {
 
     // The static-parameter path is opt-in: it only runs when the config declares
     // [vanilla] values. Reverse engineering proved the shipping build re-serialises
-    // the .wpb records into engine structs (docs/RUNTIME_PARAMS.md), so scanning
+    // the .wpb records into engine structs (docs/MSL_PN.md), so scanning
     // for the on-disk layout is a guaranteed - and expensive - miss.
     staticPatch_ = !cfg_.vanilla.empty();
     if (staticPatch_) {
@@ -250,7 +250,7 @@ bool Patcher::Start(const Config& cfg, const std::wstring& gameDir) {
 
     if (cfg_.runtime.guidanceOverride && !cfg_.runtime.probe) {
         // Primary path: hook the shared steering integrator and apply PN. This is the
-        // fully reverse-engineered route (docs/GUIDANCE_ASM.md §10), no calibration.
+        // fully reverse-engineered route (docs/ARCHITECTURE.md), no calibration.
         if (!cfg_.runtime.hookRva && cfg_.runtime.hookSignature.empty()) {
             // acz.exe is SteamStub-wrapped: our DLL is already resident while the
             // imports are resolved, i.e. BEFORE the stub decrypts .text. Installing
@@ -631,7 +631,7 @@ void Patcher::ProbeMissileSlots() {
 }
 
 void Patcher::ProbeViaDispatcher() {
-    // RVAs proven for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/RE.md §3.7).
+    // RVAs proven for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/ARCHITECTURE.md).
     // We address the dispatcher by RVA and verify its prologue bytes first; the
     // byte signature is only a fallback (it also matches look-alike code).
     static const uintptr_t kDispatcherRva = 0x9DBB0;
@@ -706,7 +706,7 @@ void Patcher::ProbeViaDispatcher() {
 }
 
 // ---------------------------------------------------------------------------
-// Plain-MSL projectile pool probe (docs/MSL_GUIDANCE.md, zero-hook, read-only)
+// Plain-MSL projectile pool probe (docs/MSL_PN.md, zero-hook, read-only)
 //
 //   singleton  S = exeBase + 0x3219A0
 //   live list  head at S+0x20 (intrusive circular list, links at node+0x00/+0x08)
@@ -1252,7 +1252,7 @@ void Patcher::ProbeRttiClasses() {
         uint32_t vtableRva;
         const char* name;
     };
-    // RVAs proven for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/RE.md §3.7).
+    // RVAs proven for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/ARCHITECTURE.md).
     // They are only used as *probe hints*: every hit is validated by reading the
     // RTTI type descriptor name back at runtime.
     static const KnownClass kClasses[] = {
@@ -1645,7 +1645,7 @@ void Patcher::TearDownGuidance() {
 }
 
 // ---------------------------------------------------------------------------
-// Plain-MSL survey: who feeds EFF_MIS_POSDIR?  (docs/MSL_TARGET.md)
+// Plain-MSL survey: who feeds EFF_MIS_POSDIR?  (docs/MSL_PN.md)
 //
 // Everything that flies -- special weapons AND the plain standard missile -- pushes
 // {position, direction} into the EFF_MIS_POSDIR trail ring every frame. The ring
@@ -1674,7 +1674,7 @@ extern "C" void __cdecl AczRingPushObserver(void* ring, void* idx, void* src, ui
 // Hand-built x64 stub:  <save rcx/rdx/r8/r9>  call handler(ring, idx, src, caller)
 //                      <restore rcx/rdx/r8/r9> call trampoline  ret
 // The original arguments must survive our C call, and the caller's return address
-// sits at [rsp] on entry, i.e. at [rsp+0x48] after the frame (docs/GUIDANCE_ASM.md
+// sits at [rsp] on entry, i.e. at [rsp+0x48] after the frame (docs/ARCHITECTURE.md
 // uses the same trick for the integrator).
 static void BuildRingThunk(uint8_t* mem, void* handler, void* tramp) {
     uint8_t* p = mem;
@@ -1878,7 +1878,7 @@ void Patcher::OnRingPushed(uintptr_t ring, uintptr_t idx, uintptr_t src, uintptr
 }
 
 // ---------------------------------------------------------------------------
-// Proportional-navigation integrator hook (docs/GUIDANCE_ASM.md §10)
+// Proportional-navigation integrator hook (docs/ARCHITECTURE.md)
 //
 //   exe+0x90510 is the shared steering/integrator: rcx don't-care, rdx = MissileSlot*,
 //   xmm2/xmm3 + [rsp+0x28] tuning floats. It is the single place where a missile's
@@ -2028,8 +2028,8 @@ bool Patcher::InstallIntegratorHook(bool quiet) {
 }
 
 // Runs with the stack aligned, once per live missile per frame, after the game has
-// written the velocity. Slot layout: docs/GUIDANCE_ASM.md §2.
-// The shared integrator is reached for more than missiles (docs/GUIDANCE_ASM.md §10:
+// written the velocity. Slot layout: docs/ARCHITECTURE.md.
+// The shared integrator is reached for more than missiles (docs/ARCHITECTURE.md:
 // 7 call sites, only part of them are homing weapons). Writing the velocity of a
 // non-missile object corrupts the game, so every slot must prove that it sits inside
 // a weapon controller's 16-entry missile array: ctrl = slot - (0x80 + i*0x68), and

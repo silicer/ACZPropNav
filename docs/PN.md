@@ -8,9 +8,23 @@ This document covers the guidance law in `src/pn/pn.cpp`:
 * how the blend maps onto the AC8-compatible `HomingForesightAmount` knob,
 * the offline engagement simulator `tools/pnsim` and the numbers it measures.
 
-Everything below is reproducible offline: `make build/pnsim.exe` (or the direct
-compiler line in the README/`docs/ARCHITECTURE.md`) then
-`./build/pnsim.exe --selftest` and `./build/pnsim.exe --report`.
+> **Which of these runs in the game.** Two paths, two formulations, same law:
+>
+> * the **special-weapon** hook (`exe+0x90510`) runs exactly what this page describes —
+>   `src/pn/pn.cpp::ComputeGuidance`, a lead-point PN
+>   (`target + targetVel·tGo·amount`) blended angularly against pure pursuit;
+> * the **plain-MSL** hook (`exe+0x13ECA0`) runs the rate form in
+>   `src/pn/msl_steer.h::ComputePn` (`ω = N·λ̇`), because it writes a *position* and can
+>   therefore command a turn rate directly instead of expressing it as an aim point.
+>
+> Both drive `λ̇ → 0`, both blend against pure pursuit by `HomingForesightAmount`, and
+> both are rate-limited by `MaxRotationAngle`. The *numbers* on this page come from the
+> `pn.cpp` formulation, which is the one the simulator measures. For the installed
+> behaviour of each path see `docs/MSL_PN.md`.
+
+Everything below is reproducible offline: `./build.sh` builds `build/pnsim.exe`, then
+`./build/pnsim.exe --selftest` and `./build/pnsim.exe --report` (on a non-Windows host
+`./build.sh test` builds and runs `build/pnsim_native` instead).
 
 ---
 
@@ -122,11 +136,15 @@ is already on the LOS. In the planar 90° crossing used by the self test that
 means: target crossing to the missile's left ⇒ LOS rotates counter-clockwise ⇒
 the missile must turn counter-clockwise ⇒ **positive** command.
 
-The production pipeline does not integrate this rate directly — it uses the
-*kinematic* form (aim at the lead point), which is what the game's aim-vector
-override can actually express (`docs/ARCHITECTURE.md`, "Guidance override").
-Both forms drive λ̇ → 0 and therefore reach the same collision course; the
-`N · λ̇` form is the textbook feedback law and the reference gain for tuning.
+`pn.cpp`'s own production pipeline (`ComputeGuidance`) does not integrate this rate
+directly — it uses the *kinematic* form (aim at the lead point), because that is the form
+this module exposes for documentation and for the simulator below. Both forms drive
+λ̇ → 0 and therefore reach the same collision course; the `N · λ̇` form is the textbook
+feedback law and the reference gain for tuning.
+
+The **shipped** hooks do integrate the rate directly: `src/pn/msl_steer.h::ComputePn`
+computes `ω = N·λ̇` and turns the velocity by `min(|ω|, thetaMax)` — the same law, applied
+as a rate rather than as an aim point. See `docs/MSL_PN.md` "STEP 2".
 
 ### 3.5 The blend — `HomingForesightAmount`
 
@@ -156,9 +174,20 @@ also exposes the "partial advance" form `leadPt(w) = target + targetVel · tGo �
 (useful for experiments and identical at the endpoints), but a vector lerp of the
 two *aim points* is not a fraction of the *angle* and becomes ill-conditioned
 when the target is close. The angular form is the one that behaves like a dial:
-half the foresight is half the lead angle. The production pipeline therefore uses
-the angular blend, and `ProportionalNavigationDirection(..., lead)` remains the
-partial-advance helper.
+half the foresight is half the lead angle. `ProportionalNavigationDirection(..., lead)`
+remains the partial-advance helper.
+
+> **Read this before changing the blend.** Blending *rotation-rate vectors*
+> (`omegaP*(1−a) + omegaPN*a`) is the obvious implementation and it is wrong: the
+> pursuit axis (`uV × uR`) and the PN axis (`R × Vr`) are usually not collinear (over a
+> 44,655-geometry grid the median angle is ≈45°, and it exceeds 120° in ~5 % of cases),
+> so opposing vectors nearly cancel and a mid `amount` commands *less* turn than either
+> endpoint — at bearing 5° / target heading 285° / R=500 m / Vt=750 m/s, `amount=0.5`
+> turned 0.012°/frame while both endpoints turned 3.0°/frame. Composing two partial
+> rotations in sequence fails too (the net swept angle returns to ~0). The shipped code
+> therefore interpolates the two *resulting directions* along the great circle, with each
+> endpoint individually clamped to the per-frame budget. `pnsim` (k11b1–k11b3) pins the
+> three invariants. See `docs/MSL_PN.md` "STEP 2" for the shipped formula.
 
 ### 3.6 Seeker cone (`MaxHomingAngle`) and turn limit (`MaxRotationAngle`)
 
@@ -209,26 +238,44 @@ Our `HomingForesightAmount` is the same 0…1 knob with the same meaning, feedin
 the angular blend of §3.5. `src/core/patcher.cpp` resolves it per side
 (`[player]` / `[enemy]`) and per model exactly like the AC8 mod.
 
-### ACZ-specific note: the engine already has a `lead` field
+### ACZ-specific note: the engine's `lead` field is **not** a foresight parameter
 
-The shipping ACZ missile records carry their own per-missile `lead` parameter
-(observed values: MSL 40, a fighter-missile variant 80, an older variant 10).
-In the real mod, `HomingForesightAmount` will therefore ultimately drive that
-**engine** parameter — the same way `AC8PropNav` writes the game's own
-`HomingForesightAmount` field (CDO offset `0x454`, row offset `0x24` in AC8) —
-rather than replacing the missile's steering loop with the blend described here.
-The mapping from our 0…1 knob onto the engine's `lead` scale is a calibration
-task for the patcher (and needs in-game verification); the simulator in this
-document validates the **guidance law and its blending behaviour**, i.e. that
-"partial lead" is well defined, monotone and bounded. It does not, and cannot
-offline, prove what the engine does with its own `lead` value.
+The shipping ACZ missile records carry a field called `lead` (observed values: MSL 40,
+a fighter-missile variant 80, an older variant 10). It is tempting to read that as the
+ACZ equivalent of `HomingForesightAmount` — and the early design in this document did
+exactly that. **It is wrong.** A hardware read-watch on the live record showed it is read
+per frame by the plain-MSL guidance function, and the disassembly shows what it feeds:
+
+```
+maxTurnPerFrame = lead·π/180 / fps          // fps = *(u32*)(ctrl+0x6EC) = 60
+```
+
+i.e. **`lead` is a turn-rate clamp in degrees per second**, not a lead distance.
+Vanilla MSL 40 °/s lines up exactly with the AC8 `MaxRotationAngle` vanilla value (also
+40 °/s); `mis_old` trading reach for `lead` 40→10 is "slower turning", not "less
+foresight". Consequences:
+
+* Raising `lead` makes the missile turn harder, but it still aims at the target's
+  **current** position — it cannot lead a crossing target.
+* So there is no data-field shortcut to PN on this game: the guidance loop has to be
+  taken over, which is what `docs/MSL_PN.md` describes.
+* A data-type patch can still usefully change `scope` / `range` / `startAng` /
+  `attack` (`docs/VANILLA.md`), just not create PN.
+* `[runtime] LeadScale` / `LeadMode` exist only for that (now opt-in) static path and
+  are **not** handling knobs — see `docs/CALIBRATION.md` §6.
+
+This document's simulator validates the **guidance law and its blending behaviour**:
+that "partial lead" is well defined, monotone and bounded. It cannot prove what the game
+does internally — that came from the in-game runs.
 
 ---
 
 ## 5. Production pipeline (pseudocode)
 
-`GuidanceResult ComputeGuidance(in, params)` — used by the injector and the
-simulator, one call per missile per frame:
+`GuidanceResult ComputeGuidance(in, params)` — the `pn.cpp` reference pipeline, called by
+the simulator and available to any future adapter. **The two shipping hooks do not call
+this**; they run `msl_steer.h::ComputePn` (`docs/MSL_PN.md` "STEP 2"), which is the rate
+form of the same law. One call per missile per frame:
 
 ```
 if (!allFinite(in) || dt < 0 || !allFinite(params))        -> valid=false, dir=0
@@ -257,7 +304,8 @@ fell back to pursuit).
 ## 6. The offline simulator (`tools/pnsim`)
 
 `tools/pnsim/main.cpp` is a deterministic planar (x/y) engagement simulator that
-calls exactly the same `ComputeGuidance()` as the DLL:
+calls exactly the same `ComputeGuidance()`:
+
 
 * missile: constant speed **680 m/s**, starts on the +x boresight at the origin;
 * target: constant speed, straight line or constant-rate turn (CCW), no
@@ -299,8 +347,11 @@ tables below; also the default), `-v` (adds one line per simulated case).
 
 ### 7.1 Self test — `./build/pnsim.exe --selftest`
 
+Two layers: `(a)`–`(h)` cover the `pn.cpp` lead-point core, `(i*)`–`(k*)` cover the
+`msl_steer.h` λ̇ form the shipping hooks run. First block, verbatim:
+
 ```
-=== pnsim self test: pn.cpp guidance core ===
+=== pnsim self test: pn.cpp guidance core + plain-MSL steer math ===
 PASS  (a) lead=0 pipeline == PursuitDirection exactly, every step of a tail chase
 PASS  (a2) lead=0 offset tail chase: desiredDir == pursuit whenever not rate limited
 PASS  (b) crossing geometry where pure pursuit misses by >100 m but full PN hits
@@ -319,8 +370,17 @@ PASS  (g3) closingSpeed > 0 head-on, < 0 when the target outruns the missile
 PASS  (g4) receding target => tGo = 0 and lead direction == pursuit direction
 PASS  (g5) collinear tail chase => LOS rotation rate ~ 0
 PASS  (h) simulator is deterministic (same case twice -> identical outcome)
---- 15 checks, 0 failure(s) ---
+PASS  (i1) msl_steer::Compute valid for a simple pursuit geometry
+...
+PASS  (k14c) that turn is non-zero and rate limited
+PASS  (k13d) terminal sweep: commanded turn stays below a quarter turn
+--- 69 checks, 0 failure(s) ---
 ```
+
+The `(i*)`–`(k*)` block is what pins the shipped behaviour: `(k11a1)/(k11a2)` the
+frame-time/units fix (90 °/s at 60 fps = 1.50 °/frame, was 3× too big),
+`(k11b1)–(k11b3)` the direction-blend invariants, `(k13a–d)` the `rmin` terminal guard,
+`(k14a–c)` the anti-parallel (target dead astern) case.
 
 ### 7.2 Sweep A — vanilla ACZ MSL seeker (FOV 75°, 40 °/s, 9 s)
 
@@ -428,10 +488,10 @@ Reading notes (also printed by `--report`):
 ## 9. What is measured, what is assumed, what is *not* proven
 
 **Measured (reproducible offline, this document's tables):** the behaviour of
-`src/pn/pn.cpp` on exactly the input the injector will feed it — LOS rate,
-closing speed, `t_go`, lead direction, angular blend, seeker gate, turn-rate
-limit, and closed-loop engagement outcomes (hit rate, miss distance, time to
-kill, cone losses) for a constant-speed missile against straight/turning targets.
+`src/pn/pn.cpp` on the input the injector feeds it — LOS rate, closing speed,
+`t_go`, lead direction, angular blend, seeker gate, turn-rate limit, and closed-loop
+engagement outcomes (hit rate, miss distance, time to kill, cone losses) for a
+constant-speed missile against straight/turning targets.
 
 **Modelling choices of the simulator (not game measurements):**
 
@@ -440,24 +500,26 @@ kill, cone losses) for a constant-speed missile against straight/turning targets
 | missile speed | 680 m/s constant | ACZ-plausible; no drag/thrust/energy model, no gravity or motor burn |
 | world | planar 2-D (x/y) | the guidance law is rotation-covariant; a 2-D sim exercises every code path without pretending to model altitude |
 | target motion | straight line or constant turn rate 0/6/15 °/s | no evasive maneuvers, no F-pole, no chaff/flares |
-| seeker | FOV 75°, 40 °/s, 9 s | AC8 vanilla MSL values quoted by `AC8PropNav.ini`, used as a stand-in until `docs/VANILLA.md` lands the ACZ-specific records |
+| seeker | FOV 75°, 40 °/s, 9 s | AC8 vanilla MSL values quoted by `AC8PropNav.ini`, kept as the sweep's stand-in (the sweep isolates the law; the shipping modulator is `HomingForesightAmount` + `MaxRotationAngle`, not these) |
 | hit criterion | closest approach ≤ 10 m, interpolated within the step | no proximity-fuse delay, no warhead lethality model |
-| guidance rate | one `ComputeGuidance()` per 1/120 s frame | matches the injector's tick |
+| guidance rate | one `ComputeGuidance()` per 1/120 s frame | the simulator's fixed step (the game runs at 60 fps and the hooks use `1/gameFps`) |
 | FOV loss | ballistic for that frame, no re-acquisition | mirrors the AC8 INI description ("outside the cone is NOT tracked") |
 | `t_go` clamp | [0, 20] s | avoids an unbounded lead point at near-zero closing speed |
 | `N` | 4 (`kPnNavConstant`) | textbook constant-speed sweet spot; only used by `PnRateCommand()` and the self test, not by the aim-point pipeline |
 
-**Not proven here / needs in-game verification:**
+**Established in-game since (so no longer open):**
 
-* ACZ's real missile speed, `LifeTime`, `MaxRotationAngle`, `MaxHomingAngle` and
-  `LockonRange` values (the simulator uses AC8/vanilla-ish stand-ins).
-* What the game engine does with its own per-missile `lead` field
-  (MSL 40, fighter-missile variant 80, old variant 10): the mod will drive that
-  parameter through the patcher; how the 0…1 `HomingForesightAmount` should map
-  onto it is a calibration question for `src/core/patcher.cpp`, not something
-  the offline simulator can answer.
-* Whether the injector can rewrite the aim vector/entities reliably at runtime
-  (`src/mem/discovery.cpp` correlation) — orthogonal to the math.
+* The plain MSL's per-frame guidance function, its slot layout, and that `lead`
+  (`P+0x2C`) is a **turn-rate clamp** rather than a foresight value — see §4's ACZ note
+  and `docs/MSL_PN.md`.
+* That taking over the guidance loop works: both paths (plain MSL and special weapons)
+  were verified in live sorties, with the PN correction applied every frame.
+
+**Still not proven here:**
+
+* ACZ's exact missile speed, `LifeTime` and `LockonRange` values as *guidance* inputs —
+  the PN path does not use them (the vanilla range/lifetime kill still runs), so the
+  simulator's stand-ins do not affect the shipped behaviour.
 * Real-world PK against manoeuvring players/AI; the simulator's targets never
   react, and the 10 m sphere is a stand-in for the game's own hit test.
 
@@ -472,6 +534,7 @@ claim above is one command away, with deterministic output.
 | --- | --- |
 | `src/pn/pn.h` | interface, `kPnNavConstant = 4` |
 | `src/pn/pn.cpp` | all formulas in this document |
+| `src/pn/msl_steer.h` | the λ̇ form the shipped hooks actually run (`ComputePn`) |
 | `tools/pnsim/main.cpp` | deterministic engagement simulator + self test (`--selftest`, `--report`, `-v`) |
 | `docs/ARCHITECTURE.md` | module contracts, where `ComputeGuidance` is called |
 | `docs/VANILLA.md` (arc-recon) | ACZ vanilla missile records, to replace the stand-in seeker values |

@@ -16,7 +16,7 @@ namespace acz {
 namespace {
 
 constexpr DWORD kMainCap = 500u * 1024u;  // AC8PropNav uses 500 KiB for the main log
-// The key log carries the probe dumps.  A Run A probe (docs/PROBE_RUN_A.md) writes
+// The key log carries the probe dumps.  A Run A probe (docs/ARCHITECTURE.md) writes
 // roughly 250 KiB of intentional diagnostics, so the cap is 512 KiB: without the
 // headroom the "keep the recent half" rotation would throw away the hook/alloc
 // events recorded at the start of the run.

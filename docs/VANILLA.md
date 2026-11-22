@@ -29,9 +29,10 @@ semantic is inferred; **LOW** = inference / unresolved.
   the MSL behaviour the mod reworks. Its comment string in `mis.wpt`, decoded from cp932,
   is **`自機用通常ミサイル` = "player aircraft standard missile"**. `misf` =
   `僚機用通常ミサイル` = "**wingman** aircraft standard missile".
-* The record has a genuine **lead/pursuit parameter at `+0x3C`** and a **seeker cone
-  angle at `+0x5A`** — these are the vanilla tail-chase behaviour controls, and they are
-  the fields our PN mod actually needs. **There is no per-missile turn-rate field.**
+* The record has a genuine **turn-rate parameter at `+0x3C`** and a **seeker cone
+  half-angle at `+0x5A`** — these are the vanilla tail-chase behaviour controls.
+  **There is no separate per-missile turn-rate field**: `+0x3C` *is* the turn rate
+  (degrees per second; see §4.1 and the §6 correction).
 
 ## 2. Record layout — `*.wpb`, 96 bytes, one record per file
 
@@ -56,7 +57,7 @@ off    type  name            shipping value (mis.wpb)   semantics
 0x30   f32   timeWait        4                          guidance phase duration          [KEY]
 0x34   f32   timeStep        4                          phase step duration              [KEY]
 0x38   f32   timeContinue    0                          post-phase continuation
-0x3C   f32   lead            40                         LEAD / PURSUIT GAIN              [KEY]
+0x3C   f32   lead            40                         TURN RATE, degrees/second       [KEY]
 0x40   f32   dispersionAng   0                          aim dispersion, radians (guns)
 0x44   f32   accFall         9.8                        gravity / fall acceleration
 0x48   f32   unknown0        0                          always 0 in all 10 shipped records
@@ -136,7 +137,7 @@ ordinal elsewhere — but no name reference exists).
 | --- | --- | --- | --- | --- |
 | `scope` | `+0x20` | seeker acquisition / lock-on range (m) | **HIGH** | only range-like field besides `range`; vanilla 1600 is a plausible ACZ MSL lock range; the Gunplay mod raises it to 3000 to extend lock; `mis_old` (a "longer reach" experiment) raises it to 2500 |
 | `range` | `+0x24` | max flight distance (m) | **HIGH** | `range/speed` for `mis` = 3000/1000 = 3 s ≈ `timeWait`; the mod raises it 3000→6000 for a range mod |
-| `lead` | `+0x3C` | **lead / pursuit gain** — the tail-chase-vs-lead control | **HIGH** (identity) | (a) the *only* missile record that trades reach against tracking (`mis_old`: scope +900, range +1000, but `lead` 40→**10**, `startAng` 90→**30**) is the textbook "longer range, worse homing" experiment; (b) wingman missiles get `lead` **80** (2× player); (c) the mod author raises `misf2`'s `lead` 28→**80** to fix a weak wingman missile (§5.1). Unit is not proven — degrees of lead, or a gain coefficient. |
+| `lead` | `+0x3C` | **turn rate, degrees/second** (was: "lead / pursuit gain") | **HIGH** (in-game) | (a) the *only* missile record that trades reach against tracking (`mis_old`: scope +900, range +1000, but `lead` 40→**10**, `startAng` 90→**30**) is the textbook "longer range, worse homing" experiment; (b) wingman missiles get `lead` **80** (2× player); (c) the mod author raises `misf2`'s `lead` 28→**80** to fix a weak wingman missile (§5.1). Unit settled in-game: read per frame as `maxTurnPerFrame = lead·π/180 / fps`, i.e. deg/s. **Not** a foresight value — see §6. |
 | `startAng` | `+0x5A` | seeker cone half-angle / launch gimbal (deg) | **HIGH** (identity) | `mis` 90 (wide, launches at any aspect), wingman 60/30, guns 0/45; `mis_old` 30 pairs with its weak `lead`; the mod normalises `misf2` 30→**60** alongside its `lead` fix (§5.1) |
 | `timeStart` | `+0x2C` | delay before guidance engages (s) | **MEDIUM** | 0 for player MSL (immediate guidance), 0.5/2.5 for wingman, 2.0 for the `gunf` long-burst logic |
 | `timeWait` | `+0x30` | duration of the guidance phase (s) → **lifetime-ish** | **MEDIUM** | 4 s for player MSL; wingmen 14/18 s; `mis_old` 10 s. Best candidate for a `LifeTime` mapping, but `range/speed` also bounds life. |
@@ -146,10 +147,11 @@ ordinal elsewhere — but no name reference exists).
 | `attack` | `+0x59` | damage | **HIGH** | name + monotone with gun calibre (8 small, 12 large) |
 | `type` | `+0x58` | 1 = gun, 2 = missile | **HIGH** | clean split across all ten files |
 
-### 4.1 What controls *turn rate*? (`MaxRotationAngle` has no data equivalent)
+### 4.1 What controls *turn rate*? — the answer is `lead` (`+0x3C`)
 
-**There is no missile turn-rate field in the weapon schema.** The 17 floats are fully
-accounted for by the `.wpt` names, and none is an angular rate.
+**Original conclusion of this section (kept for the reasoning): there is no separate
+turn-rate field in the weapon schema**, and the 17 floats are fully accounted for by the
+`.wpt` names. That much held.
 
 Where an angular rate *does* exist in this game's data is the **aircraft** flight model:
 `data/mis/mpl/<ac>.pmb` (400 B) with text twin `<ac>.pmt`, whose `pitch`/`roll`/`yaw`
@@ -157,12 +159,13 @@ sub-blocks carry `rotRate`, `rotMin … rotMax`, `rotBuffet`, `revRate` in deg/s
 `a06e.pmt` has `pitch.rotRate = 5.0`, `pitch.rotMax = 30.555`, `roll.rotMax = 133.8`.
 That is the airframe, not the missile.
 
-**Conclusion (confidence: HIGH negative):** the missile's maximum rotation rate is a
-**code-side constant** (or derived from `lead`), not a data field. Practical consequence
-for the mod: `MaxRotationAngle` must be implemented in our own guidance loop (rate-limit
-the commanded turn) exactly as `ARCHITECTURE.md` already plans, and must **not** be mapped
-onto a `.wpb` field. Do not let the signature scanner search for a per-missile turn-rate
-float — it does not exist in the data.
+**Conclusion (confidence: HIGH, settled in-game):** the missile's maximum rotation rate is
+**the `lead` field at `+0x3C`, in degrees per second** — a data field, read per frame by
+the plain-MSL guidance function as `maxTurnPerFrame = lead·π/180 / fps`. Practical
+consequence for the mod: `MaxRotationAngle` is enforced in our own guidance loop (we
+command a turn rate and rate-limit it), and must **not** be mapped onto a different
+`.wpb` field. Do not let the signature scanner search for an *additional* per-missile
+turn-rate float — `lead` is it.
 
 ## 5. Differential evidence: are the `.wpt` text twins authoritative?
 
@@ -188,7 +191,7 @@ strongest single piece of evidence that `lead` + `startAng` are the guidance con
 
 **`mis.wpb` → `misf.wpb`** (player → wingman): `scope` unchanged; `range` 3000→2000;
 `timeStart` 0→0.5; `timeWait` 4→14; `timeStep` 4→10; **`lead` 40→80**; **`startAng` 90→60**.
-Wingmen get double the pursuit gain but a tighter start cone and a shorter reach.
+Wingmen turn twice as fast but get a tighter start cone and a shorter reach.
 
 **Known `.wpt`↔`.wpb` discrepancies** (confidence HIGH, all confirmed by direct byte read):
 
@@ -227,20 +230,36 @@ Two conclusions, both **HIGH** confidence:
    normalising a weak wingman missile up to the standard wingman values. That is the
    cleanest possible demonstration that **`lead` and `startAng` are the homing-quality
    fields** — and it raises their confidence from MEDIUM to **HIGH** for *identity*
-   (though not for the exact unit of `lead`).
+   (the exact unit of `lead` was settled later in-game: deg/s).
 
 
 ## 6. Mapping to the AC8 mod's INI surface
 
-`ACZPropNav.ini` mirrors `AC8PropNav.ini`, so each AC8 property needs a home:
+`ACZPropNav.ini` mirrors `AC8PropNav.ini`, so each AC8 property needs a home. **This table
+is a data-side identification only** — the shipped mod does not drive PN through these
+fields (see the correction at the end of this section):
 
 | AC8 property | ACZ field | off | confidence | note |
 | --- | --- | --- | --- | --- |
-| `HomingForesightAmount` | **`lead`** | `+0x3C` | **HIGH** (identity) | the only pursuit-gain-shaped field; vanilla 40 (player), 80 (wingman), 10 (weak `mis_old`); the one record the mod author fixes by hand raises exactly this 28→80 |
-| `MaxHomingAngle` | **`startAng`** | `+0x5A` | **HIGH** (identity) | degrees, vanilla 90; the mod normalises `misf2` 30→60 alongside `lead`. Verifiable at runtime: set 0 → missile should never acquire off-axis |
+| `HomingForesightAmount` | *(no equivalent)* | — | — | see the correction below |
+| `MaxHomingAngle` | **`startAng`** | `+0x5A` | **HIGH** (identity) | degrees, **half**-angle; vanilla 90 (⇒ 180° full cone); the mod normalises `misf2` 30→60 alongside `lead` |
 | `LockonRange` | **`scope`** | `+0x20` | **HIGH** | vanilla 1600 m; the community range mod raised exactly this |
 | `LifeTime` | **`timeWait`**, bounded by `range/speed` | `+0x30` | **MEDIUM** | vanilla 4 s; `range/speed` = 3 s. Pick `timeWait` as primary and clamp by `range` |
-| `MaxRotationAngle` | **none** | — | **HIGH (negative)** | no angular-rate field exists in the weapon schema; must be enforced by our own guidance loop |
+| `MaxRotationAngle` | **`lead`** | `+0x3C` | **HIGH** (in-game) | degrees per second. Vanilla 40 (player), 80 (wingman), 10 (weak `mis_old`) — the 40 matches AC8's own vanilla `MaxRotationAngle` |
+
+> **Correction (2026-11, after the in-game read-watch).** Earlier revisions of this page
+> identified `lead` (`+0x3C`) as the ACZ home of `HomingForesightAmount`. That is wrong.
+> The field is read per frame by the plain-MSL guidance function as
+> `maxTurnPerFrame = lead·π/180 / fps` — it is the **turn-rate clamp**, i.e. the ACZ
+> analogue of `MaxRotationAngle`, not a foresight/lead distance. Vanilla value 40 °/s
+> equals AC8's vanilla `MaxRotationAngle` of 40 °/s, and `mis_old`'s "longer reach,
+> weaker homing" experiment lowers it 40→10 (slower turning) exactly as that reading
+> predicts.
+>
+> Consequence: **there is no data-field route to proportional navigation in this game.**
+> PN has to be applied in the guidance loop, which is what the shipped mod does (see
+> `docs/MSL_PN.md`). `scope`/`range`/`startAng`/`attack` remain genuinely useful data
+> fields — the identification of `startAng` and `scope` above is unaffected.
 
 ## 7. Community-sourced cross-checks (not extracted by us)
 
@@ -290,12 +309,14 @@ strings -n 4 ACZPropNav/work/x/data/datapack_jp.bin | grep -oE 'mis/mpl/[a-z0-9_
 
 ## 9. What is still open
 
-* **Runtime placement is unverified.** We proved the on-disk layout; we have not yet
-  observed the `.wpb` records *in memory* in `acz.exe`. The scanner should therefore key on
-  the `f32 lead` / `f32 scope` / `f32 range` triplet **plus** the `type==2` byte at `+0x58`
-  with `data_off==0x10` at `-0x10`, and treat the relative offsets from §2 as the layout
-  hypothesis to verify — they are almost certainly preserved (it is a plain struct), but
-  that is an assumption, not a measurement.
+* **Runtime placement: answered — the flat record does exist in memory, but only via a
+  pointer.** An in-game probe captured a live record `P` (reached as
+  `fire+0x1FB8` / `node+0x28`) and validated it field-for-field against this table:
+  `P = .wpb + 0x10`, `*(u32*)(P-0x10) == 0x10`, `scope`/`range`/`lead`/`speed`/`type`/
+  `startAng` all matching. So the layout in §2 holds verbatim at runtime. What does *not*
+  work is scanning writable memory for the raw 96 bytes — the engine also keeps a
+  re-serialised, header-per-field copy, so a naive full-memory scan misses. The mod
+  therefore does not scan for these records by default; see `docs/HANDOFF.md` §3.5.
 * **Special-weapon behaviour remains code-only.** If the mod ever needs per-SPW values they
   must be found in the exe (or measured in game), not in data.
 * `misf2.wpb` / `gunf2.wpb` / `gun1.wpb` / `gun3.wpb` / `mis_old.wpb` have no `.wpt` twin

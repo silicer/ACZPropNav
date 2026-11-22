@@ -1,0 +1,165 @@
+# =============================================================================
+# Release pipeline: fires when `dev` is merged into `main`.
+#
+# Trigger: a push to `main`. That is the merge event - main is only ever advanced
+# by merging the reviewed `dev` branch (see AGENTS.md), so "something landed on
+# main" and "cut a release" are the same moment.
+#
+# What it does
+#   1. builds on native Windows and runs the whole offline suite (same gate as CI;
+#      never publish a binary that has not passed it),
+#   2. reads the version from `kVersion` in src/core/mod.cpp - the single source of
+#      truth - and packages the flat release zip,
+#   3. tags `v<version>` if the tag does not exist yet,
+#   4. creates the GitHub Release, or updates the existing one in place if the tag
+#      already existed (re-releasing the same version is legitimate: a merge that
+#      only fixes packaging or docs should not need a version bump).
+#
+# Re-running: the workflow is idempotent. If a Release for the tag exists, its
+# asset is replaced. Use workflow_dispatch to re-run deliberately.
+# =============================================================================
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and package, but do not tag or publish"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # tag + create/update the Release and upload the asset
+
+jobs:
+  release:
+    name: Build, test, publish
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are needed to decide whether one already exists
+
+      - name: Install MinGW-w64 toolchain (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+            zip
+            unzip
+
+      - name: Read version from kVersion
+        id: ver
+        run: |
+          VERSION=$(sed -n 's/.*kVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' src/core/mod.cpp | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::cannot read kVersion from src/core/mod.cpp"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      # Same gate as ci.yml: if the tests fail, nothing is published.
+      - name: Build and run all offline tests
+        run: ./build.sh test
+
+      - name: Package release zip
+        run: |
+          ./tools/package_release.sh --version "${{ steps.ver.outputs.version }}" --out-dir dist
+          echo "--- packaged ---"
+          ls -l dist
+
+      - name: Compute checksum
+        id: sum
+        run: |
+          ZIP="dist/ACZPropNav-${{ steps.ver.outputs.version }}-win64.zip"
+          test -f "$ZIP" || { echo "::error::expected $ZIP"; exit 1; }
+          SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "sha256: $SHA"
+
+      - name: Create tag if missing
+        if: ${{ !inputs.dry_run }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG already exists - the release asset will be updated in place"
+          else
+            git tag -a "$TAG" -m "ACZPropNav ${{ steps.ver.outputs.version }}"
+            git push origin "$TAG"
+            echo "created and pushed $TAG"
+          fi
+
+      - name: Publish (or update) the GitHub Release
+        if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag     = "${{ steps.ver.outputs.tag }}"
+          $zip     = "${{ steps.sum.outputs.zip }}"
+          $sha     = "${{ steps.sum.outputs.sha256 }}"
+          $version = "${{ steps.ver.outputs.version }}"
+
+          if (-not (Test-Path "RELEASE_NOTES.md")) { throw "RELEASE_NOTES.md missing" }
+
+          # The human-written notes are the release body; append the checksum of the
+          # binary actually built by this run.
+          $body = Get-Content "RELEASE_NOTES.md" -Raw
+          $body += "`n---`n`n**sha256**: ``$sha``n"
+          Set-Content -Path "release_body.md" -Value $body -Encoding utf8
+
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $tag exists - replacing its asset and notes"
+            gh release upload $tag $zip --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+            gh release edit $tag --notes-file release_body.md
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
+          } else {
+            gh release create $tag $zip --title "ACZPropNav $version" --notes-file release_body.md --latest
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+            Write-Host "published $tag"
+          }
+
+      - name: Summary
+        run: |
+          {
+            echo "## ACZPropNav ${{ steps.ver.outputs.version }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| tag | \`${{ steps.ver.outputs.tag }}\` |"
+            echo "| asset | \`ACZPropNav-${{ steps.ver.outputs.version }}-win64.zip\` |"
+            echo "| sha256 | \`${{ steps.sum.outputs.sha256 }}\` |"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "| published | **no** (dry run) |"
+            else
+              echo "| published | yes |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aczpropnav-release-${{ steps.ver.outputs.version }}
+          path: dist/*.zip
+          if-no-files-found: warn
+          retention-days: 30

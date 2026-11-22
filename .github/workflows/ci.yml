@@ -1,0 +1,116 @@
+# =============================================================================
+# CI for the `dev` branch: build the Windows x64 DLL and run the offline tests.
+#
+# Runs on every push to `dev` and on every pull request that targets `main`.
+# Nothing is published from here - publishing happens only in release.yml, which
+# fires when `dev` is merged into `main`.
+#
+# Why windows-latest and not ubuntu + wine: the offline test binaries are Windows
+# PE files, and several of them (memtest, hooktest, smoke) exercise VirtualAlloc /
+# VirtualProtect / LoadLibrary and inline-hook behaviour, which Wine does not
+# emulate faithfully enough to be a trustworthy gate. A native Windows runner runs
+# exactly what users run. The ubuntu job below exists only to prove that the
+# cross-compile path still works (it is how the maintainer builds locally) and to
+# run the pure-math self-test natively.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref instead of burning runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Full suite on native Windows: this is the authoritative gate.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows x64 (full offline suite)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 toolchain (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+            zip
+
+      - name: Toolchain version
+        run: |
+          x86_64-w64-mingw32-g++ --version
+          echo "---"
+          git --version
+
+      # `build.sh test` builds every target and then runs the six offline test
+      # binaries. On Windows they execute natively, so this is the full suite
+      # (69 pnsim assertions + initest/memtest/hooktest/hwwatchtest/smoke).
+      - name: Build and run all offline tests
+        run: ./build.sh test
+
+      - name: Verify release packaging works
+        run: |
+          ./tools/package_release.sh --out-dir dist
+          ls -l dist
+
+      # Keep the binaries around so a failed run can be inspected without a local
+      # rebuild (the tests print their assertions to stdout, which is already in the
+      # log, but the DLL is useful when a hook test regresses).
+      - name: Upload build artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aczpropnav-dev-build
+          path: |
+            build/ACZPropNav.dll
+            build/XINPUT1_4.dll
+            build/VERSION.dll
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Cross-compile check: proves the Linux-host build path still works, and runs the
+  # guidance math natively (pnsim has no Win32 dependency).
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux cross-build (math self-test)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64 zip
+
+      # No Wine here on purpose: build.sh detects that it cannot execute PE files and
+      # falls back to compiling/running pnsim for the host, saying so explicitly.
+      # CI=1 makes a failure exit non-zero.
+      - name: Build and run the runnable tests
+        env:
+          CI: "1"
+        run: ./build.sh test
+
+      - name: Verify release packaging works
+        run: |
+          ./tools/package_release.sh --out-dir dist
+          sha256sum dist/*.zip

@@ -65,7 +65,7 @@ public:
 
     // Called from the PN integrator hook. `slot` is the engine object passed in
     // rdx; `caller` is the return address inside the game (which call site reached
-    // the integrator). docs/GUIDANCE_ASM.md §2/§10.
+    // the integrator). docs/ARCHITECTURE.md/§10.
     void OnMissileSlotUpdated(uintptr_t slot, uintptr_t caller);
 
 private:
@@ -80,7 +80,7 @@ private:
     // SAFE probe (Probe=1): temporarily hook the missile dispatcher and read only
     // the controller object the game itself passes in. Earlier versions scanned
     // heaps for WeaponModel instances and chased pointers found that way - that
-    // crashed the game (docs/VERIFICATION.md §8), so those probes are gone.
+    // crashed the game (docs/HANDOFF.md), so those probes are gone.
     void ProbeViaDispatcher();
     // Probe: observe the missile dispatcher (exe+0x9DBB0) with a safe detour that
     // forwards rcx/rdx/r8/r9 unchanged. Logs each controller's RTTI class and live
@@ -94,13 +94,13 @@ public:
     void OnDispatcherObserved(uintptr_t self, uintptr_t a2, uintptr_t a3, uintptr_t a4);
 private:
     // Read-only live probe of the projectile pool that holds plain-MSL missiles
-    // (docs/MSL_GUIDANCE.md): singleton at exe+0x3219A0, live intrusive list at
+    // (docs/MSL_PN.md): singleton at exe+0x3219A0, live intrusive list at
     // S+0x20, 0x70-byte nodes with links at +0x00/+0x08. Samples several frames and
     // reports which 3-float triples advance (position) vs. move by a constant vector
     // (velocity) - that is what identifies the MSL guidance fields without a hook.
     void ProbeProjectilePool();
     void StartPoolProbe();
-    // Route A (docs/MSL_GUIDANCE.md): the EFF_MIS_POSDIR ring holds {pos, dir} for
+    // Route A (docs/MSL_PN.md): the EFF_MIS_POSDIR ring holds {pos, dir} for
     // every visible missile each frame. We locate the ring object by its RTTI vtable
     // and sample its raw contents (read-only) to learn the exact entry layout and to
     // watch MSL's per-frame position/direction - without any hook.
@@ -167,10 +167,10 @@ private:
     std::wstring gameDir_;
 
     // "Run A" live probe (INI [runtime] Probe = 1): read-only survey of the
-    // plain-MSL pipeline (core/probe.h, docs/PROBE_RUN_A.md).  Driven from Tick().
+    // plain-MSL pipeline (core/probe.h, docs/ARCHITECTURE.md).  Driven from Tick().
     ProbeModel probe_;                     // active only when Probe = 1
     // "Run B" hardware read-watch probe (INI [runtime] HwWatch = 1): finds which
-    // code reads the live .wpb `lead`/`startAng` fields (docs/PROBE_RUN_B.md).
+    // code reads the live .wpb `lead`/`startAng` fields (docs/ARCHITECTURE.md).
     ProbeWatch watch_;                     // active only when HwWatch = 1
 
     std::vector<game::ParamRow> rows_;
@@ -194,11 +194,11 @@ private:
     std::vector<uintptr_t> probeCtrlDumped_;  // controllers whose body we already dumped
     // The static-parameter path only runs when the INI declares [vanilla] values.
     // On the shipping build the .wpb records are re-serialised into engine structs
-    // (docs/RUNTIME_PARAMS.md), so scanning for them is a guaranteed miss - and an
+    // (docs/MSL_PN.md), so scanning for them is a guaranteed miss - and an
     // expensive one (multi-GB, tens of seconds). Opt-in only.
     bool staticPatch_ = false;
 
-    // --- plain-MSL survey: who feeds EFF_MIS_POSDIR? (docs/MSL_TARGET.md) ----
+    // --- plain-MSL survey: who feeds EFF_MIS_POSDIR? (docs/MSL_PN.md) ----
     // The EFF_MIS_POSDIR ring receives {pos, dir} for every missile each frame, so
     // the call site that pushes it IS inside the per-frame advance of a flying
     // missile. exe+0x3B300 / 0x3B370 are the two MIS_POSDIR ring-A "Add" methods
@@ -233,7 +233,7 @@ private:
     volatile long ringSrcCount_ = 0;
     volatile long long ringPushCount_ = 0;
     double lastRingSummary_ = 0.0;
-    // --- proportional-navigation integrator hook (docs/GUIDANCE_ASM.md §10) ---
+    // --- proportional-navigation integrator hook (docs/ARCHITECTURE.md) ---
     void* pnThunk_ = nullptr;   // RWX stub: call trampoline, then our handler
     bool pnHooked_ = false;
     // Our DLL is loaded while acz.exe's imports are being resolved, i.e. BEFORE the

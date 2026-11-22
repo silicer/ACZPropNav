@@ -1,7 +1,7 @@
 // ACZPropNav - "Run A" live probe (INI [runtime] Probe = 1).
 //
 // Read-only survey of the plain-MSL projectile pipeline.  It is the experiment
-// specified in docs/PROBE_RUN_A.md: two observation hooks plus a Tick sampler.
+// specified in docs/ARCHITECTURE.md: two observation hooks plus a Tick sampler.
 //
 //   * hook exe+0x201460  pool Allocate(rcx=pool, edx=size, r8d=align) -> rax
 //     Records {size, returned ptr} only for the two caller return addresses we
@@ -99,7 +99,7 @@ private:
     bool singletonSeen_ = false;
     double singletonAt_ = 0.0;
     // Set when the flat .wpb record layout was confirmed at a pool node+0x28 pointer
-    // (docs/WEAPON_MODEL_LAYOUT.md).  The WeaponModel scan and the R3 tally exist only
+    // (docs/MSL_PN.md).  The WeaponModel scan and the R3 tally exist only
     // to *find* that layout, so both are skipped once it is proven.
     bool flatRecordSeen_ = false;
 

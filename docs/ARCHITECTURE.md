@@ -15,8 +15,8 @@ Goal: replace the vanilla tail-chase missile homing with **proportional navigati
 * A config file that the *game* reads (`ACZPropNav.ini`) can only work through an
   injected DLL, which is exactly how `AC8PropNav.dll` works on the UE5 title.
 
-So: a DLL that is loaded through a DLL-proxy, reads `ACZPropNav.ini`, locates the
-live missile parameter structures at runtime and applies the settings.
+So: a DLL that is loaded through a DLL-proxy, reads `ACZPropNav.ini`, and applies the
+settings by steering the missiles in the game's own per-frame update.
 
 ## Layering
 
@@ -29,38 +29,47 @@ live missile parameter structures at runtime and applies the settings.
    +--------------------------+---------------------------------------------+
    | src/core  config.cpp     | parse ACZPropNav.ini (AC8-compatible schema) |
    | src/core  log.cpp        | capped main log + key.log                    |
-   | src/core  patcher.cpp    | map INI model -> discovered game structures  |
+   | src/core  patcher.cpp    | integration: the two hooks, probes, tick     |
    | src/core  mod.cpp        | bootstrap thread, safety, tick loop          |
    +--------------------------+---------------------------------------------+
+   | src/pn    msl_pn.cpp     | plain-MSL post-update hook + slot scan + log |
+   | src/pn    msl_steer.h    | true λ̇ PN math (pure, `pnsim`-tested)        |
    | src/pn    pn.cpp         | pursuit / PN / blend / rate limit / FOV      |
    | src/mem   mem.cpp        | SEH-safe read/write, region scan, float runs |
-   | src/mem   discovery.cpp  | param-table + entity correlator              |
-   | src/hook  hook.cpp       | conservative x64 inline hook (fallback path) |
+   | src/mem   discovery.cpp  | param-table + entity correlator (opt-in)     |
+   | src/hook  hook.cpp       | conservative x64 inline hook engine          |
    +-----------------------------------------------------------------------+
 ```
 
-## Module ownership (team)
+## Module map
 
-| Path | Owner | Responsibility |
-| --- | --- | --- |
-| `src/common/`, `src/core/config.*`, `src/core/log.*` | Lead | shared types, INI parser, logging |
-| `src/core/mod.cpp`, `src/core/patcher.cpp`, `ACZPropNav.ini`, docs | Lead | integration, config file, docs |
-| `src/pn/*`, `tools/pnsim/*` | pn-core | PN math + offline engagement simulator + verification |
-| `src/mem/*`, `tools/memtest/*` | mem-engine | memory primitives, scanners, discovery correlator |
-| `src/hook/*`, `loader/*`, `tools/hooktest/*` | loader-hook | inline hook + proxy loader |
-| `tools/arc/*`, `docs/ARC.md`, `docs/VANILLA.md` | arc-recon | `.arc` unpacking, vanilla missile parameters |
+| Path | Responsibility |
+| --- | --- |
+| `src/common/`, `src/core/config.*`, `src/core/log.*` | shared types/vector math, INI parser, logging |
+| `src/core/mod.cpp` | bootstrap thread, DllMain / `AczAddonInit`, tick loop, shutdown |
+| `src/core/patcher.cpp` | integration: hook arming, discovery, probes, per-frame telemetry |
+| `src/core/probe_*.{h,cpp}` | the two read-only diagnostic probes (`Probe`, `HwWatch`) |
+| `src/pn/msl_pn.cpp` + `msl_steer.h` | plain-MSL hook, slot scan, true λ̇ PN math |
+| `src/pn/pn.cpp` + `pn.h` | pursuit / lead-point PN / blend / rate limit / FOV (also the `pnsim` model) |
+| `src/mem/*` | SEH-safe read/write, region scan, discovery correlator |
+| `src/hook/hook.cpp` | conservative x64 inline hook engine (refuses anything it cannot relocate) |
+| `loader/` | `XINPUT1_4.dll` and `VERSION.dll` proxies |
+| `tools/` | offline tests, `.arc`/`.wpb` tooling, RE scripts |
+| `docs/` | this documentation set (see `docs/INDEX.md`) |
 
-Everyone keeps test code inside their own `tools/<x>/` directory and their sources
-compilable by the root `Makefile` (wildcards pick up `src/**/*.cpp`).
+Every test lives in its own `tools/<name>/` directory and is picked up by `build.sh`
+(which wildcards `src/**/*.cpp`). See `AGENTS.md` for conventions.
 
 ## Hard rules (safety, because we inject into a live game)
 
-1. **No unvalidated writes.** A write to a memory location is only allowed after a
-   locator proved the structure (value signature + correlation) or the user forced
-   it with `ForceOffsets=1`.
+1. **No unvalidated writes.** Each missile slot must prove it really is a missile slot
+   (live mask bit + the object at `ctrl` is a weapon controller) before the PN hooks write
+   it; the static-parameter path only writes rows a locator proved (or the user forced with
+   `ForceOffsets=1`).
 2. **Everything SEH-guarded.** `__try/__except` around every dereference; exceptions
    in our tick loop must never propagate into the game.
 3. **No exceptions, no CRT heap churn in hot paths.** Build with `-fno-exceptions`.
+   Never log or allocate from inside a detour.
 4. **Dry-run by default when unsure.** If `RequireVerifiedOffsets=1` (default) and
    nothing verifies, log loudly and change nothing.
 5. **Uninstallable.** Uninstalling means deleting `ACZPropNav.dll` + `XINPUT1_4.dll`
@@ -82,8 +91,9 @@ compilable by the root `Makefile` (wildcards pick up `src/**/*.cpp`).
 
 ## Discovery contract (`src/mem/discovery.h`)
 
-The game is Steam-packed and undocumented, so the mod ships a *signature-driven*
-locator rather than hard-coded offsets:
+*Opt-in machinery for the static-parameter path; the PN hooks do not use it.* It exists
+because the game is Steam-packed and undocumented, so if a future build ever exposes the
+records again the mod can find them by value instead of by hard-coded offsets:
 
 1. **Anchor search** — for each `KnownValue` in `DiscoveryOptions::known` (a
    per-missile-type list of `{property, value, tolerance}` derived from
@@ -97,38 +107,62 @@ locator rather than hard-coded offsets:
 3. **Cross-model validation** — repeat with a second missile model; the hypothesis
    must also match *its* values (e.g. QAAM FOV 120 vs MSL 75) at the same offsets.
    Only layouts that survive both are reported as `verified`.
-4. **Entity correlation** (for the guidance override) — from the verified table
-   address, find heap objects that hold a pointer to the row; inside those objects
-   find the `(missilePos, missileVel, targetPos, targetVel)` vectors by sampling
-   two frames and matching `|Δpos| ≈ |vel|·dt` and `Δpos ∥ vel`.
-5. Everything not verified goes to the log with its score so a user can hand the log
+4. Everything not verified goes to the log with its score so a user can hand the log
    back for calibration.
 
 `DiscoveryOptions::known` is filled from `docs/VANILLA.md` (ACZ vanilla values) by
-`patcher.cpp`; the INI can override it in `[runtime]`/`[vanilla]` (see README).
+`patcher.cpp`; the INI can override it in `[runtime]`/`[vanilla]` (see `docs/CONFIG.md`).
 
 ## Guidance override
 
-Primary adapter (**AimPoint / lead point**, works once entities are correlated):
+What ships are **two post-update hooks** that run the PN math on the game's own state,
+each independent of the value-correlation path above (so they work even when nothing was
+ever "discovered"):
 
-* vanilla: missile steers toward `targetPos`
-* mod: missile steers toward `targetPos + targetVel * tGo * lead` with
-  `tGo = range / closingSpeed`, clamped, blended by `HomingForesightAmount`
-* turn command rate-limited by `MaxRotationAngle`, gated by `MaxHomingAngle`.
+| path | hook | written | math | authority |
+| --- | --- | --- | --- | --- |
+| plain MSL | `FUN_14013ECA0` @ `RVA 0x13ECA0`, after the vanilla body | missile **position** (`slot+0x00..0x08`), and optionally the slot's attitude | `src/pn/msl_steer.h::ComputePn` — true `ω = N·λ̇` rate law | `docs/MSL_PN.md` |
+| special weapons | steering integrator @ `RVA 0x90510`, after the vanilla body | missile **velocity** (`slot+0x20..0x2C`), same speed magnitude | `src/pn/pn.cpp::ComputeGuidance` — lead-point PN blended with pursuit | `docs/MSL_PN.md`, `docs/PN.md` |
 
-Fallback adapter (**ParamPatch**, no hooks): writes the four static properties
-(`MaxRotationAngle`, `MaxHomingAngle`, `LifeTime`, `LockonRange`) directly into the
-verified parameter rows — always active, safe, and useful by itself.
+Both take `HomingForesightAmount` as the pursuit↔PN blend, rate-limit the commanded turn by
+`MaxRotationAngle · (1/gameFps)` and gate on the seeker cone; they differ only in how the PN
+demand is expressed (a rate, vs. an aim point) and therefore in which write they can make.
+Neither hook logs or allocates: they publish into fixed arrays that `Tick()` drains on the
+worker thread. Addresses, entry bytes and the full slot/field maps are in
+`docs/HANDOFF.md` §3.
 
-## Tests (all runnable offline, `make test`)
+One consequence worth knowing: the engine does not tell the mod which weapon a
+special-weapon slot belongs to, so that whole path is driven by the **`[player] msl`**
+entry of the INI (all homing special weapons share it). The plain-MSL path *does* separate
+`[player]` from `[enemy]` per slot.
+
+Optional static adapter (**ParamPatch**, no hooks, opt-in via the INI's `[vanilla]`
+section): writes the four static properties (`MaxRotationAngle`, `MaxHomingAngle`,
+`LifeTime`, `LockonRange`) into the verified parameter rows. Safe and read-back verified —
+but see the warning under "Discovery order": on the shipping build the records are
+re-serialised, so this path does not find them and is off by default.
+
+The older "AimPoint / lead point" description — steer toward
+`targetPos + targetVel·tGo·lead`, `tGo = range/closingSpeed` — is what the special-weapon
+path still does (`pn.cpp::ProportionalNavigationDirection`), and it is what `pnsim`'s
+engagement sweeps in `docs/PN.md` measure. The plain-MSL path moved to the λ̇ rate form in
+`msl_steer.h` because writing a *position* lets it command the turn rate directly instead
+of expressing it as an aim point.
+
+## Tests (all runnable offline, `./build.sh test`)
 
 * `initest` — INI parser vs. the real `AC8PropNav.ini` (11 player + 1 enemy models,
   blank = vanilla, legacy `msl = 0.8`, longest-key-first resolution, clamping).
-* `pnsim` — engagement sim: tail-chase vs PN vs blend over many geometries; prints
-  miss distances, hit rates, FOV losses. Proves the math.
+* `pnsim` — guidance math + engagement sim: tail-chase vs PN vs blend over many
+  geometries; prints miss distances, hit rates, FOV losses. **69 assertions**; the only
+  suite that also runs natively on a non-Windows host.
 * `memtest` — synthesises a fake memory image (parameter table + entities) and
-  checks the correlator finds exactly it, plus SEH-safe read/write behaviour.
-* `hooktest` — hooks functions in-process, validates trampoline + refusal rules.
+  checks the correlator finds exactly it, plus SEH-safe read/write behaviour
+  (including cross-page protection restore).
+* `hooktest` — hooks functions in-process, validates trampoline + refusal rules, and
+  pins the entry bytes of every hook target the mod installs.
+* `hwwatchtest` — the hardware-read-watch mechanism (one-shot debug registers + VEH,
+  including cross-thread arming).
 * `smoke` — loads the real `ACZPropNav.dll` into a synthetic process, calls its
   exported entry point and asserts that the boot sequence, the discovery verdict, the
   log files and the tick loop all work without crashing.
@@ -157,23 +191,31 @@ by hand (`[runtime]` switches such as `GuidanceOverride`, `Probe`, `HwWatch`, `L
 * `DllMain` → worker thread: the self-contained path, used with our own proxy
   (`XINPUT1_4.dll`, alternative `VERSION.dll`).
 * `AczAddonInit(void* hostCtx)` → the community `version.dll` preloader path
-  (`ACZero\mods\ACZPropNav.dll`). Host context layout proven in `docs/RE.md`:
-  `+0x08` game dir, `+0x10` `HMODULE` of acz.exe, `+0x28` `printf` logger. Both paths
-  converge on the same idempotent `StartOnce()`; the INI is looked up in
-  `mods\ACZPropNav.ini`, then next to the DLL, then in the game dir, in that order.
+  (`ACZero\mods\ACZPropNav.dll`). Host context layout: `+0x08` game dir, `+0x10`
+  `HMODULE` of acz.exe, `+0x28` `printf` logger. Both paths converge on the same
+  idempotent `StartOnce()`; the INI is looked up in `mods\ACZPropNav.ini`, then next to
+  the DLL, then in the game dir, in that order.
 
 ### Discovery order (in `patcher.cpp`)
-1. **Exact-record scan (primary).** The shipping missile records are 96-byte structs
-   loaded verbatim from `data/mis/mpl/*.wpb`; `src/core/vanilla_records.h` (generated by
-   `tools/gen_vanilla_header.py` from the extracted shipping archive) embeds their bytes.
-   We scan writable, non-image memory for `explPers=1.0 + scope=1600`, validate the record
-   (`data_off==0x10`, `type==2`, sane `lead`/`speed`), classify it against the three
-   shipping missiles (msl/misf/misf2) and expose the documented field offsets
-   (`lead +0x3C`, `startAng +0x5A`, `range +0x24`, `scope +0x20`). This is exact and fast.
+1. **Exact-record scan** — only when the INI has a `[vanilla]` section. The shipping
+   missile records are 96-byte structs loaded verbatim from `data/mis/mpl/*.wpb`;
+   `src/core/vanilla_records.h` (generated by `tools/gen_vanilla_header.py` from the
+   extracted shipping archive) embeds their bytes. We scan writable, non-image memory for
+   `explPers=1.0 + scope=1600`, validate the record (`data_off==0x10`, `type==2`, sane
+   `lead`/`speed`), classify it against the three shipping missiles (msl/misf/misf2) and
+   expose the documented field offsets (`lead +0x3C`, `startAng +0x5A`, `range +0x24`,
+   `scope +0x20`).
 2. **Value-correlation fallback.** If the records were modified by another data mod, the
    generic correlator (`src/mem/discovery.cpp`) searches for the vanilla float tuples,
    infers the layout from repeated relative offsets and cross-validates it against a
    second missile model. Only "verified" rows are ever written.
+
+> **Both stages are opt-in and off by default.** Reverse engineering proved the shipping
+> build re-serialises the `.wpb` records into engine structs (every field gets its own
+> header, member slot granularity `0x18`), so scanning for the on-disk 96-byte layout is a
+> guaranteed — and expensive — miss. The whole static-parameter path only runs when the
+> INI declares `[vanilla]` values; otherwise `Patcher::Start` says so in the log and skips
+> it. The guidance override does not depend on it.
 
 Hard guards that were added after testing:
 * the mod's own image is excluded from every scan — its static tables contain the very
@@ -189,13 +231,13 @@ Hard guards that were added after testing:
 ACZ stores the player's MSL and the wingmen's MSL as separate records
 (`mis.wpb` vs `misf.wpb`/`misf2.wpb`). Records classified as wingman/NPC ordnance take the
 `[enemy]` settings (with model-key aliasing `misf → msl` so a normal AC8-style
-`[enemy] msl = 0.3` just works). Special weapons have no data record at all (code-side);
-the mod logs which configured models could not be served and that the PN override is the
-only path for those.
+`[enemy] msl = 0.3` just works). Special weapons have no data record at all (code-side),
+so the plain-MSL and integrator PN hooks are the only path for those.
 
-### Roadmap (documented, not implemented)
-`docs/RE.md` shows that `acz.exe` ships plaintext MSVC RTTI for ~400 classes, including
-`WeaponModel` and `WeaponEx*Ctrl` vftables and `EffRingBuffer<UEFF_MIS_POSDIR>`. The next
-step for true per-frame PN without any manual calibration is to rebuild the
-name→vftable map from the live image and locate missile objects by their vftable, which
-replaces stage 2/3 of the entity correlator with an exact type match.
+### Possible future work (documented, not implemented)
+`acz.exe` ships plaintext MSVC RTTI for ~400 classes (`scripts` for this live in
+`tools/re/rtti_scan.py`), including `WeaponModel`, the `WeaponEx*Ctrl` vftables and
+`EffRingBuffer<UEFF_MIS_POSDIR>`. Rebuilding the name→vftable map from the live image and
+locating missile objects by their vftable would replace the value-correlation stages above
+with an exact type match — but since the value path is opt-in and PN does not need it,
+this is a robustness improvement, not a missing feature.

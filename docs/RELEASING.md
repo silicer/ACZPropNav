@@ -68,40 +68,60 @@ a forbidden extension, or a non-`PE32+ x86-64` DLL aborts the run.
 
 ## 4. Cutting the release
 
+**It is automated.** You do not tag or upload anything by hand; merging `dev` into
+`main` publishes. See `AGENTS.md` for the branch rules.
+
 ```sh
-# 0. clean tree, correct version
-git status                     # must be clean
-grep -n 'kVersion' src/core/mod.cpp       # bump it here, commit that first
+# 1. on dev: green CI and a decided version
+git switch dev
+git status                              # must be clean
+grep -n 'kVersion' src/core/mod.cpp     # bump it here if this is a version bump
+#   CI (.github/workflows/ci.yml) must be green on dev
 
-# 1. build + run every offline test
-./build.sh test                # preferred: runs all six test binaries
-                               # (make test runs only initest/pnsim/memtest/hooktest)
+# 2. update RELEASE_NOTES.md — it becomes the body of the GitHub Release verbatim
+$EDITOR RELEASE_NOTES.md
 
-# 2. package
-tools/package_release.sh --version 1.0.0
-#    → dist/ACZPropNav-1.0.0-win64.zip  + printed sha256 and member list
-#    optional: --keep          keep the staging tree for inspection
+# 3. open a PR dev -> main (or let the maintainer merge) and merge it
+#    the release workflow then:
+#      builds on Windows + runs the full offline suite
+#      reads kVersion -> packages ACZPropNav-<ver>-win64.zip
+#      creates tag v<ver> if absent
+#      creates (or updates) the GitHub Release with the zip attached
+```
 
-# 3. tag + publish
-git tag -a v1.0.0 -m "ACZPropNav 1.0.0"
-git push origin v1.0.0
-# create the GitHub Release for the tag and attach the single zip
+Manual fallback, if CI is unavailable:
+
+```sh
+./build.sh test                         # full suite, on Windows
+tools/package_release.sh --version X.Y.Z --out-dir dist
+gh release create vX.Y.Z dist/ACZPropNav-X.Y.Z-win64.zip \
+   --title "ACZPropNav X.Y.Z" --notes-file RELEASE_NOTES.md
 ```
 
 Attach **one asset**: the zip. Do not also attach loose DLLs (users get confused about
 which layout works) and do not commit `dist/` (gitignored).
 
-### Where the binary must come from
+**Re-releasing the same version** is legitimate (e.g. a packaging or docs fix): the
+workflow finds the existing tag/release and replaces the asset and notes rather than
+failing. Bump `kVersion` when the binaries actually change.
 
-The DLLs are Windows **x64** PE files. There are two legitimate build hosts:
+### Where the binary comes from
 
-* **Windows** with LLVM-MinGW/mingw-w64 — this is the verified path (`docs/VERIFICATION.md`).
-* **Linux cross-compile**, which is what this checkout does by default
-  (`x86_64-w64-mingw32-g++`). `./build.sh` produces the same kind of artefacts as the
-  Windows build (same sources, same flags), but the offline test binaries are `.exe`
-  files, so `./build.sh test` **cannot run them** without Wine. Options: run the tests
-  on a Windows box before tagging, or run the step under Wine
-  (`wine ./build/initest.exe …`), not just cross-compile and hope.
+### Where the binary comes from
+
+The DLLs are Windows **x64** PE files. Release builds are produced by CI on a native
+`windows-latest` runner (`.github/workflows/release.yml`), which also runs the full
+offline suite before publishing — that is the authoritative path.
+
+A local build is fine for development. Either:
+
+* **Windows** with LLVM-MinGW/mingw-w64 — the full suite runs natively.
+* **Linux cross-compile** (`x86_64-w64-mingw32-g++`, the default here). `./build.sh`
+  produces equivalent artefacts (same sources, same flags), but the test binaries are
+  `.exe` files, so `./build.sh test` **cannot execute them** without Wine. It detects
+  this and runs the pure-math `pnsim` natively instead, clearly saying the rest was
+  skipped. That is a reduced gate: if your change touches hooks, the memory layer or
+  the loader, let CI (or a Windows box) run the full suite before you merge to `main`.
 
 Do not "fix" the missing tests by skipping them: `initest`/`pnsim`/`memtest`/
 `hooktest`/`hwwatchtest`/`smoke` are the only automated proof that the INI parser, the
@@ -110,33 +130,28 @@ load path still work. A release with unrun tests is a release with no evidence.
 
 ## 5. Pre-flight checklist
 
-Run through this immediately before tagging:
+The workflow enforces most of this automatically (build + full test suite + zip
+verification happen before anything is published), so the list is short on purpose.
+Check these **before merging `dev` into `main`**:
 
-- [ ] `git status` is clean; `git status --ignored --short` shows `build/` and `work/`
-      as ignored, **not** as untracked.
-- [ ] `git ls-files | grep -E '^(work|build)/'` prints nothing.
-- [ ] Version bumped in `src/core/mod.cpp` (`kVersion`), README/README.en mention the
-      same version if they quote one, tag matches (`v1.0.0`).
-- [ ] `./build.sh test` ends with `ALL TESTS PASSED` (on Windows or under Wine).
-- [ ] `file build/ACZPropNav.dll build/XINPUT1_4.dll build/VERSION.dll` →
-      `PE32+ executable ... x86-64 (DLL)` for all three. A 32-bit or wrong-arch
-      artefact will fail to load and looks like "the mod does nothing".
-- [ ] Proxy export tables still match the system DLLs (the load path breaks silently
-      if an export is dropped). Count the EAT slots; expected **15** for
-      `XINPUT1_4.dll` (8 named — `XInputGetState`, `XInputSetState`, … — plus
-      ordinal-only forwarders, mirroring the system DLL's table shape) and **17**
-      named entries for `VERSION.dll`:
+- [ ] `git status` is clean; `git ls-files | grep -E '^(work|build)/'` prints nothing.
+      (`work/` holds copies of the game executable — never commit it.)
+- [ ] CI green on `dev`.
+- [ ] `kVersion` in `src/core/mod.cpp` is the version you intend to release. It is the
+      **only** place the version lives; the packager and the workflow both read it.
+- [ ] `RELEASE_NOTES.md` describes this release — it becomes the GitHub Release body
+      verbatim, with the build's sha256 appended automatically.
+- [ ] If you changed the loader: the proxy export tables still match the system DLLs
+      (a dropped export breaks the load path silently). Expected EAT slots: **15** for
+      `XINPUT1_4.dll`, **17** for `VERSION.dll`:
       ```sh
       OBJDUMP=$(command -v x86_64-w64-mingw32-objdump || echo objdump)
       $OBJDUMP -p build/XINPUT1_4.dll | sed -n '/Export Address Table -- Ordinal Base/,/^$/p' | grep -c '+base'   # 15
-      $OBJDUMP -p build/VERSION.dll   | sed -n '/Export Address Table -- Ordinal Base/,/^$/p' | grep -c '+base'   # 17
       ```
-- [ ] `tools/package_release.sh --version <ver>` succeeds: it re-checks DLL
-      architecture and the "no game files" rule for you.
-- [ ] `unzip -l dist/ACZPropNav-<ver>-win64.zip` lists only the layout in §1; the
-      sha256 the script printed is pasted into the release notes.
-- [ ] Release notes state: game build tested (`SHA-256 3802B0DC…` / Steam build id),
-      what changed, and that Steam updates may move the RVAs the mod patches.
+- [ ] If this is the first release against a new game build: say so in the notes. A
+      Steam update can move the RVAs the mod patches; the hooks then refuse to install
+      (logging why) rather than mis-patching, so the mod degrades to vanilla instead
+      of crashing — but it does stop working until the RVAs are re-verified.
 
 ## 6. Known traps (they have bitten before)
 

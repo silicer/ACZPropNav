@@ -1,16 +1,25 @@
-# MSL_PN — plain-MSL proportional navigation (post-update hook on `exe+0x13ECA0`)
+# MSL_PN — proportional navigation for the plain MSL and the special weapons
 
-Status: **implemented, in-game verified, offline-green** (2026-11-21). `./build.sh test`:
-initest 268 / **pnsim 62** / memtest 85 / hooktest 98 / hwwatchtest 27 / smoke PASS.
+Two hooks, one design. The **plain MSL** (the missile every aircraft fires) gets a
+post-update hook on `exe+0x13ECA0` and is steered by writing its **position**. The
+**special weapons** (QAAM/SAAM/XLAA/XMAA/XAGM) get a post-update hook on the shared
+steering integrator `exe+0x90510` and are steered by writing their **velocity**. Both are
+described here because they share the INI surface, the logging, the safety rules and the
+"run the game first, then correct it" structure; §10 covers the integrator path.
+
+Status: **implemented, in-game verified, offline-green**. `./build.sh test`:
+**`pnsim` 69 assertions**, plus `initest` / `memtest` / `hooktest` / `hwwatchtest` /
+`smoke` (the last five are Windows PE binaries).
 
 Files: `src/pn/msl_pn.h`, `src/pn/msl_pn.cpp` (hook + slot scan + logging),
-`src/pn/msl_steer.h` (pure PN math, unit-tested by `pnsim`), wiring in
-`src/core/patcher.cpp` (`Start` / `Tick` / `Shutdown`), prologue test
-`hooktest` Test8, math tests `pnsim` (i1)–(i16).
+`src/pn/msl_steer.h` (pure PN math, unit-tested by `pnsim`), the integrator path in
+`src/core/patcher.cpp` (`InstallIntegratorHook` / `OnMissileSlotUpdated`), wiring in
+`src/core/patcher.cpp` (`Start` / `Tick` / `Shutdown`), prologue tests
+`hooktest` Test8/Test9, math tests `pnsim` (i1)–(i16) and (k1)–(k14).
 
 ## Why this target
 
-Run B's hardware read-watch (`docs/RUN_B_RESULTS.md`) showed that
+The hardware read-watch probe (`[runtime] HwWatch = 1`, see `docs/HANDOFF.md` §6) showed that
 `FUN_14013ECA0` (**RVA `0x13ECA0`**) reads the live `.wpb` record
 `P = *(node+0x28)` every frame: `P+0x2C` (lead) 88 times at
 `exe+0x13EFA2` (`vmovss xmm0,[rax+0x2c]`, `rax = P`), plus `P+0x4A`
@@ -89,15 +98,15 @@ displacement (same speed, rate-limited turn) would have put it.
 
 ## INI mapping
 
-| INI key | effect |
-| --- | --- |
-| `[player] msl HomingForesightAmount` | PN blend for the player's plain MSL: `0` = pure pursuit (rate-limited by `MaxRotationAngle`), `1` = full PN (`N = PnGain`). **Blank = that model is left vanilla**; an explicit `0` still arms the mod in pursuit mode, which is what makes an A/B baseline possible. Ships at `0.7`. |
-| `[enemy] msl HomingForesightAmount` | same PN blend for every non-player missile (hostile **and** wingman, since they share the record family). Ships at `0.3` (i.e. mostly pursuit for NPCs). |
-| `[player]/[enemy] msl MaxRotationAngle` | per-frame turn limit; blank ⇒ 180 °/s. |
-| `[runtime] GuidanceOverride` | master switch (0 = no PN at all). |
-| `[runtime] DryRun` | log-only mode. |
-| `MaxHomingAngle` | seeker cone HALF-angle in degrees. Overrides the game's own `P+0x4A` (startAng) when set; the PN write is refused (and counted as `outOfCone=`) when the target falls outside it. |
-| `LifeTime`, `LockonRange` | **not wired on this path** — the vanilla range/lifetime kill and the HUD lock ring still apply unchanged. |
+| INI key | plain MSL | special weapons (§10) |
+| --- | --- | --- |
+| `[player] msl HomingForesightAmount` | PN blend: `0` = pure pursuit (rate-limited by `MaxRotationAngle`), `1` = full PN (`N = PnGain`). **Blank = that model is left vanilla**; an explicit `0` still arms the mod in pursuit mode, which is what makes an A/B baseline possible. Ships at `0.7`. | the **only** source for this path (the engine does not reveal the weapon per slot) |
+| `[enemy] msl HomingForesightAmount` | same PN blend for every non-player missile (hostile **and** wingman, since they share the record family). Ships at `0.3` (mostly pursuit for NPCs). | **not used** |
+| `[player]/[enemy] msl MaxRotationAngle` | per-frame turn limit; blank ⇒ 180 °/s. | per-frame turn limit; blank ⇒ 45 °/s, additionally bounded by the game's own clamp |
+| `[runtime] GuidanceOverride` | master switch (0 = no PN at all) — both paths | same |
+| `[runtime] DryRun` | log-only mode | same |
+| `MaxHomingAngle` | seeker cone HALF-angle in degrees. Overrides the game's own `P+0x4A` (startAng) when set; the PN write is refused (and counted as `outOfCone=`) when the target falls outside it. | same, blank ⇒ 90° |
+| `LifeTime`, `LockonRange` | **not wired** — the vanilla range/lifetime kill and the HUD lock ring still apply unchanged. | same |
 
 ## Logging (`ACZPropNav.key.log`, all `MSLPN:` prefixed)
 
@@ -361,9 +370,8 @@ two missiles misbehaved.
    * The rate limit bounds the achievable turn radius to `|v|/ω` — about **318 m** at the
      default 180 °/s — so orbiting a point 30 m away is geometrically impossible.
    * A closed-loop sweep over **972 engagement geometries** yields identical hit rate and
-     closest approach with and without the hand-back (the sweep is the `run`
-     comparison in `docs/HANDOFF.md` §11.11 discussion; the invariant is pinned by
-     `pnsim` (k13a–k13d)).
+     closest approach with and without the hand-back; the invariant is pinned by
+     `pnsim` (k13a–k13d).
    So PN now owns the entire flight: `[runtime] TerminalZone = 0` is the default. A
    positive value restores the hand-back for A/B comparison only; the `terminal=` counter
    in the 2 s summary reports frames spent inside the zone (0 unless opted in).
@@ -376,3 +384,70 @@ removed), fire two MSLs at one
 target and check the 2 s summary line: `ownCol=` (>0 confirms the shared-owner
 mechanism), `terminal=0` (full PN: the hand-back is off); both missiles should fly
 smooth, matching trajectories.
+
+## §10. The special-weapon path (`exe+0x90510`)
+
+Same idea, different write surface. `exe+0x90510` is the **shared steering integrator**:
+the one place where a homing missile's velocity is committed
+(`movss [slot+0x20/0x24/0x28], xmm0`, `slot+0x2C = 0`). It is called from 7 sites that
+cover the whole homing family (`0x9165D 0x99B50 0x9AFB0 0x9D168 0x9E030 0x9E990 0x9F230`),
+so one hook serves QAAM/SAAM/XLAA/XMAA/XAGM and the non-`WeaponEx` generic path alike.
+
+| fact | value |
+| --- | --- |
+| hook | entry `exe+0x90510`, 8 stolen bytes `48 8B C4 C5 FA 11 58 20`; uniqueness by the 12-byte form `… C5 FA 11 50` |
+| arguments | `rcx` don't-care, `rdx` = `MissileSlot*`, `xmm2`/`xmm3` + `[rsp+0x28]` tuning floats (all re-materialised by the thunk) |
+| slot array | `ctrl+0x80 + i*0x68`, 16 slots; live mask `u32` at `ctrl+0x5C` |
+| slot `+0x00` | position vec4 |
+| slot `+0x10`/`+0x14` | heading (elevation / azimuth, radians) |
+| slot `+0x20..0x2C` | **velocity, metres per frame** — what PN overwrites (`+0x2C` = 0) |
+| slot `+0x30` | target position, refreshed every frame by the seeker (so it *is* the current one at hook time) |
+| slot `+0x54` | age in **seconds**, advanced once per frame by the game |
+| slot `+0x5C` | `u16` own object handle (`& 0x3FF`, `0xFFFF` = not registered) |
+| per-frame turn clamp (vanilla) | `±1.42222 rad/s ÷ fps` |
+| lead factor (vanilla aim point) | `k = 0.5 · tGo` from `exe+0x90950` |
+
+**Mechanism.** A hand-built x64 thunk (generated at hook time, `sub rsp,0x58` frame)
+preserves the original argument registers — including the 5th stack argument that the
+relocated prologue spills — calls the trampoline to run the game's own update, then calls
+the C handler with the slot pointer. The handler:
+
+1. **Proves the slot is a missile slot.** The integrator is reached for non-missile objects
+   too, and writing their velocity corrupts the game. `IsMissileSlot()` walks
+   `ctrl = slot − (0x80 + i·0x68)` for `i = 0..15`, requires the object at `ctrl` to have a
+   vtable inside `acz.exe` whose RTTI name looks like a weapon controller, and counts
+   failures as `nonMissile` (a live run reports `nonMissile=0`).
+2. Reads `pos = slot+0x00`, `vel = slot+0x20`, `aim = slot+0x30`, `age = slot+0x54`.
+3. Derives the **target velocity** by finite-differencing `slot+0x30` across frames,
+   using the slot's own `+0x54` age delta as the exact frame time (falls back to the last
+   good `dt` when the integrator is entered twice in one frame).
+4. Runs `pn.cpp::ComputeGuidance` — the **lead-point** form (see the box at the top of
+   `docs/PN.md`), not `ComputePn` — with `HomingForesightAmount` / `MaxRotationAngle` /
+   `MaxHomingAngle` from the **`[player] msl`** entry (the engine does not reveal which
+   weapon a slot belongs to).
+5. Rejects unreliable geometry: `|v|` outside `0.02…60` m/frame, range outside
+   `30…30000` m, out of cone, or `tGo > 8 s` (counted as `badGeometry`).
+6. Writes `slot+0x20..0x28 = desiredDir · |v|`, `slot+0x2C = 0` — **speed magnitude
+   preserved**, so the game's collision sweep (`pos→pos+vel`) stays correct.
+
+**Logging.** `PN 积分器钩子已安装 / PN integrator hooked at exe+0x90510 …` once, then a
+periodic stats line (`frames= launches= slots= callers= nonMissile= lastRange=
+lastSpeed= frame=`), and `PN applied: …` detail on the first 20 frames and every 300th.
+The startup byte check and its signature fallback are logged too — see
+`docs/CALIBRATION.md` §5.
+
+**Verified in-game:** `launches=6` for 6 QAAMs fired, `applied=1022` frames actually
+steered, `nonMissile=0`, caller `exe+0x9F4E6` inside the predicted WeaponEx range, and the
+user reported 6/6 hits.
+
+**Limitations specific to this path**
+
+* Everything is driven by `[player] msl`: an `[enemy]`-only configuration does **not**
+  affect special weapons (they are code-side, with no data record to classify against).
+* We only write the velocity **direction**, so the game's own `±1.42222 rad/s` clamp still
+  bounds the per-frame turn on top of `MaxRotationAngle`.
+* The slot's heading (`+0x10`/`+0x14`) is left alone — the game re-derives the visual aim
+  from the corrected velocity on the next frame, which is why this path needs no Step-1B
+  equivalent.
+* `LifeTime` / `LockonRange` are not changed here either; the vanilla range kill and HUD
+  lock ring still apply.

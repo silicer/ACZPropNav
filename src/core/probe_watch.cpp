@@ -33,8 +33,8 @@ namespace acz {
 namespace {
 
 // ---------------------------------------------------------------------------
-// RVAs for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/MSL_FIRE_OBJECT.md,
-// docs/WEAPON_MODEL_LAYOUT.md).
+// RVAs for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/MSL_PN.md,
+// docs/MSL_PN.md).
 // ---------------------------------------------------------------------------
 constexpr uint32_t kRvaMcGlobal = 0x3409F8;        // *(void**) -> mission control
 constexpr uint32_t kRvaPlayerIdx = 0x3409F2;       // u8 player object index
@@ -282,7 +282,7 @@ bool InsideOwnModule(uintptr_t addr) {
     return ownBase != 0 && addr >= ownBase && addr < ownBase + ownSize;
 }
 
-// Weapon-controller vtables (docs/RUNTIME_PARAMS.md §5.1, docs/RTTI.md).
+// Weapon-controller vtables (docs/MSL_PN.md, docs/ARCHITECTURE.md).
 struct Vt {
     uint32_t rva;
     const char* name;

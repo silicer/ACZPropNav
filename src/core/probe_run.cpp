@@ -1,6 +1,6 @@
 // ACZPropNav - "Run A" live probe implementation (read-only).
 //
-// See core/probe.h for the design summary and docs/PROBE_RUN_A.md for what one
+// See core/probe.h for the design summary and docs/ARCHITECTURE.md for what one
 // run collects.  Safety rules obeyed here:
 //   * the two detours never allocate, never take a lock, never log: fixed arrays
 //     + Interlocked only;
@@ -30,8 +30,8 @@ namespace acz {
 namespace {
 
 // ---------------------------------------------------------------------------
-// RVAs for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/RUNTIME_PARAMS.md,
-// docs/MSL_GUIDANCE.md).  RVA = VA - 0x140000000.
+// RVAs for acz.exe 4,046,008 B / SHA-256 3802B0DC... (docs/MSL_PN.md,
+// docs/MSL_PN.md).  RVA = VA - 0x140000000.
 // ---------------------------------------------------------------------------
 constexpr uint32_t kRvaAllocate = 0x201460;            // pool Allocate(pool,size,align)
 constexpr uint32_t kRvaWeaponModelAllocRet = 0x0C767D;  // return addr of the WeaponModel alloc
@@ -295,7 +295,7 @@ extern "C" __attribute__((noinline)) void* PopDetour(void* s, void* a2, void* a3
 
 // ---------------------------------------------------------------------------
 // exe+0x1B7B00: world = rcx; called once per frame as world-update phase 7
-// (docs/MSL_ADVANCE.md §4.1).  The detour only records the world pointer and a
+// (docs/MSL_PN.md).  The detour only records the world pointer and a
 // frame counter; all validation and every read happen later, in Tick.
 // ---------------------------------------------------------------------------
 typedef uintptr_t (*WorldFn)(void*, void*, void*, void*);
@@ -339,7 +339,7 @@ ScanRegions CollectDataRegions() {
 constexpr uint64_t kMaxScanBytes = 2ull * 1024 * 1024 * 1024;  // ~2 GB per pass
 
 // ---------------------------------------------------------------------------
-// R3 value sets (docs/RUNTIME_PARAMS.md §6 R3).
+// R3 value sets (docs/MSL_PN.md R3).
 // ---------------------------------------------------------------------------
 enum R3Kind {
     kR3_1600 = 0,
@@ -904,7 +904,7 @@ void ProbeModel::DumpParamObject(uintptr_t node, uintptr_t paramPtr) {
     L().Key("PROBE-A: PARAM object #%d node=%s ptr=%s (0x200 bytes, offsets relative to ptr)",
             paramPtrCount_, mem::Hex(node).c_str(), mem::Hex(paramPtr).c_str());
 
-    // ---- Explicit check of the flat .wpb record layout (docs/WEAPON_MODEL_LAYOUT.md):
+    // ---- Explicit check of the flat .wpb record layout (docs/MSL_PN.md):
     //      P = node+0x28; P-0x10 has u32 data_off = 0x10; P+0x10 scope, P+0x14 range,
     //      P+0x24 timeStep, P+0x2C lead, P+0x44 speed (u32), P+0x48 type u8,
     //      P+0x49 attack u8, P+0x4A startAng u8.  The record is 'mis'-specific for a
@@ -1056,7 +1056,7 @@ void ProbeModel::WeaponModelScan() {
 }
 
 // ---------------------------------------------------------------------------
-// R3 anchored-delta tally (docs/RUNTIME_PARAMS.md §6 R3).
+// R3 anchored-delta tally (docs/MSL_PN.md R3).
 //
 // One combined pass over the data regions collects the addresses of all the
 // values of interest, then the distances anchor->companion are tallied.  This is
@@ -1211,7 +1211,7 @@ void ProbeModel::R3ScanAndTally() {
 }
 
 // ---------------------------------------------------------------------------
-// World snapshot (docs/MSL_ADVANCE.md §6/§9): the real motion state is the part
+// World snapshot (docs/MSL_PN.md/§9): the real motion state is the part
 // transform of a world object, not the pool node.  Every ~250 ms while something
 // is flying we log
 //   * the per-frame tick counter (proves the hook is live, once per frame),
