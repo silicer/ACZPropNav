@@ -32,6 +32,18 @@ if [ -z "${CC:-}" ]; then
     esac
     command -v "$CC" >/dev/null 2>&1 || CC=$CXX
 fi
+# Fail early and clearly if neither convention is available. Without this the first
+# compile simply prints "x86_64-w64-mingw32-g++: command not found", which does not
+# say what to install (this happened in CI: the MSYS2 msystem and the package repo
+# disagreed, so the compiler landed outside PATH).
+if ! command -v "$CXX" >/dev/null 2>&1; then
+    printf 'error: no MinGW-w64 C++ compiler found (tried "%s").\n' "$CXX" >&2
+    printf '  Debian/Ubuntu : sudo apt install g++-mingw-w64-x86-64\n' >&2
+    printf '  MSYS2         : msystem MINGW64 + pacman -S mingw-w64-x86_64-gcc\n' >&2
+    printf '  or set CC/CXX explicitly.\n' >&2
+    exit 1
+fi
+
 BUILD=build
 SRC=src
 
