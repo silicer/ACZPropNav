@@ -199,8 +199,12 @@ do_test() {
         for t in initest pnsim memtest hooktest hwwatchtest; do
             [ -x "$BUILD/$t.exe" ] || { red "skip $t (not built)"; continue; }
             step "test: $t"
+            # memtest provokes faults on purpose; the trace makes a crash say which
+            # call died. Set MEMTEST_TRACE=0 to silence it.
             if [ "$t" = "pnsim" ]; then
                 "$BUILD/$t.exe" --selftest || rc=1
+            elif [ "$t" = "memtest" ]; then
+                MEMTEST_TRACE="${MEMTEST_TRACE:-1}" "$BUILD/$t.exe" || rc=1
             else
                 "$BUILD/$t.exe" || rc=1
             fi

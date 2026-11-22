@@ -24,6 +24,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -398,17 +399,32 @@ void TestProcessAndModule() {
     Check(acz::mem::Hex(0x1234) == "0x1234", "Hex formatting");
 }
 
+// When MEMTEST_TRACE=1 each guarded call prints its name before it runs, so a
+// crash reports the exact operation that died. Off by default to keep the normal
+// output readable.
+static const bool kTrace = (std::getenv("MEMTEST_TRACE") != nullptr);
+static void Trace(const char* what) {
+    if (kTrace) std::printf("      [trace] %s\n", what);
+}
+
 void TestReadSafety() {
     TestScope t("SEH-safe ReadBytes");
     uint8_t buf[64] = {};
+    Trace("ReadBytes(0, buf, 4)");
     Check(!acz::mem::ReadBytes(0, buf, 4), "ReadBytes(null) == false");
+    Trace("ReadBytes(1, buf, 4)  <-- first real fault");
     Check(!acz::mem::ReadBytes(1, buf, 4), "ReadBytes(0x1) == false");
+    Trace("ReadBytes(0, buf, 0)");
     Check(!acz::mem::ReadBytes(0, buf, 0), "ReadBytes(size=0) == false");
+    Trace("ReadBytes(0, nullptr, 4)");
     Check(!acz::mem::ReadBytes(0, nullptr, 4), "ReadBytes(dst=null) == false");
     Check(!acz::mem::ReadBytes(reinterpret_cast<uintptr_t>(&buf[0]), buf, 64 * 1024 + 4),
           "ReadBytes(oversized) == false");
+    Trace("IsReadable(0, 4)");
     Check(!acz::mem::IsReadable(0, 4), "IsReadable(null) == false");
+    Trace("IsReadable(buf, 16)");
     Check(acz::mem::IsReadable(reinterpret_cast<uintptr_t>(buf), 16), "IsReadable(valid) == true");
+    Trace("ReadBytes(buf+1, buf+8, 4)");
     Check(acz::mem::ReadBytes(reinterpret_cast<uintptr_t>(buf) + 1, buf + 8, 4),
           "ReadBytes(unaligned source) works (reads must not require alignment)");
 
@@ -423,13 +439,17 @@ void TestReadSafety() {
     if (pages) {
         DWORD old = 0;
         VirtualProtect(pages + page, page, PAGE_NOACCESS, &old);
+        Trace("after VirtualProtect(PAGE_NOACCESS) on page 2");
         Check(!acz::mem::IsReadable(reinterpret_cast<uintptr_t>(pages + page), 4),
               "IsReadable(no-access page) == false");
+        Trace("ReadBytes(pages+page-8, buf, 16)  <-- spans into NOACCESS");
         Check(!acz::mem::ReadBytes(reinterpret_cast<uintptr_t>(pages + page - 8), buf, 16),
               "ReadBytes spanning into a no-access page == false");
+        Trace("ReadBytes(pages+page-8, buf, 8)  <-- stays readable");
         Check(acz::mem::ReadBytes(reinterpret_cast<uintptr_t>(pages + page - 8), buf, 8),
               "ReadBytes that stays inside the readable page succeeds");
         VirtualProtect(pages + page, page, PAGE_GUARD | PAGE_READWRITE, &old);
+        Trace("after VirtualProtect(PAGE_GUARD) on page 2");
         Check(!acz::mem::IsReadable(reinterpret_cast<uintptr_t>(pages + page), 4),
               "IsReadable(PAGE_GUARD) == false");
         VirtualFree(pages, 0, MEM_RELEASE);
